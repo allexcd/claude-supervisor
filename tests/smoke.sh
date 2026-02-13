@@ -131,6 +131,8 @@ echo "────────────────────"
 test_repo="/tmp/claude-supervisor-test-$$"
 mkdir -p "$test_repo"
 git -C "$test_repo" init -b main &>/dev/null
+git -C "$test_repo" config user.email "ci@test.local"
+git -C "$test_repo" config user.name "CI Test"
 touch "$test_repo/README.md"
 git -C "$test_repo" add . &>/dev/null
 git -C "$test_repo" commit -m "init" &>/dev/null
@@ -215,6 +217,8 @@ fi
 test_repo_gi="/tmp/claude-supervisor-test-gitignore-$$"
 mkdir -p "$test_repo_gi"
 git -C "$test_repo_gi" init -b main &>/dev/null
+git -C "$test_repo_gi" config user.email "ci@test.local"
+git -C "$test_repo_gi" config user.name "CI Test"
 echo "node_modules/" > "$test_repo_gi/.gitignore"
 touch "$test_repo_gi/README.md"
 git -C "$test_repo_gi" add . &>/dev/null
@@ -238,6 +242,8 @@ echo "───────────────────"
 env_test_repo="/tmp/claude-supervisor-test-env-$$"
 mkdir -p "$env_test_repo"
 git -C "$env_test_repo" init -b main &>/dev/null
+git -C "$env_test_repo" config user.email "ci@test.local"
+git -C "$env_test_repo" config user.name "CI Test"
 touch "$env_test_repo/README.md"
 git -C "$env_test_repo" add . && git -C "$env_test_repo" commit -m "init" &>/dev/null
 
@@ -423,6 +429,8 @@ CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=""
 spawn_nokey_repo="/tmp/claude-spawn-nokey-$$"
 mkdir -p "$spawn_nokey_repo"
 git -C "$spawn_nokey_repo" init -b main &>/dev/null
+git -C "$spawn_nokey_repo" config user.email "ci@test.local"
+git -C "$spawn_nokey_repo" config user.name "CI Test"
 touch "$spawn_nokey_repo/README.md"
 git -C "$spawn_nokey_repo" add . && git -C "$spawn_nokey_repo" commit -m "init" &>/dev/null
 mkdir -p "$spawn_nokey_repo/.claude"
@@ -522,6 +530,8 @@ mkdir -p "$spawn_test_repo/.claude/commands"
 touch "$spawn_test_repo/.claude/CLAUDE.md"
 echo '{}' > "$spawn_test_repo/.claude/settings.json"
 git -C "$spawn_test_repo" init -b main &>/dev/null
+git -C "$spawn_test_repo" config user.email "ci@test.local"
+git -C "$spawn_test_repo" config user.name "CI Test"
 touch "$spawn_test_repo/README.md"
 git -C "$spawn_test_repo" add . &>/dev/null
 git -C "$spawn_test_repo" commit -m "init" &>/dev/null
