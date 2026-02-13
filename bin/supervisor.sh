@@ -47,6 +47,7 @@ if [[ ! -f "$repo_path/tasks.conf" ]]; then
   # Scaffold .claude/ directory (skip if already exists)
   if [[ ! -d "$repo_path/.claude" ]]; then
     mkdir -p "$repo_path/.claude/agents"
+    mkdir -p "$repo_path/.claude/commands"
 
     # Copy CLAUDE.md
     if [[ -f "$TEMPLATES_DIR/CLAUDE.md" ]]; then
@@ -63,9 +64,17 @@ if [[ ! -f "$repo_path/tasks.conf" ]]; then
     # Copy agents directory contents
     if [[ -d "$TEMPLATES_DIR/.claude/agents" ]]; then
       cp -r "$TEMPLATES_DIR/.claude/agents/"* "$repo_path/.claude/agents/" 2>/dev/null || true
-      ok "Created .claude/agents/         (add custom subagents here)"
+      ok "Created .claude/agents/         (reviewer, debugger, test-writer subagents)"
     else
       ok "Created .claude/agents/         (add custom subagents here)"
+    fi
+
+    # Copy commands directory contents
+    if [[ -d "$TEMPLATES_DIR/.claude/commands" ]]; then
+      cp -r "$TEMPLATES_DIR/.claude/commands/"* "$repo_path/.claude/commands/" 2>/dev/null || true
+      ok "Created .claude/commands/       (/techdebt, /explain, /diagram, /learn skills)"
+    else
+      ok "Created .claude/commands/       (add custom slash commands here)"
     fi
   else
     warn ".claude/ directory already exists — skipping scaffold"
@@ -82,20 +91,68 @@ fi
 
 echo ""
 printf "${BOLD}Claude Supervisor${RESET}\n"
-printf "Repo: ${CYAN}%s${RESET}\n" "$repo_path"
-echo ""
+printf "  Repo : ${CYAN}%s${RESET}\n" "$repo_path"
 
-# Step 1: Check dependencies
+step "1/5 — Checking dependencies"
 check_deps
 
-# Step 2: Resolve API key
+step "2/5 — Resolving API key"
 resolve_api_key
 
-# Step 3: Fetch models once
+step "3/5 — Fetching available models from Anthropic API"
 fetch_models
 
-# Step 4: Parse tasks.conf (INI-style blocks) and spawn agents
+# Step 3.5: Warn if the PermissionRequest hook model is no longer available
+# Models get deprecated — if settings.json still references an old model ID the
+# hook will silently fail, which means risky actions go ungated.
+_check_hook_model() {
+  local settings_file="$repo_path/.claude/settings.json"
+  [[ -f "$settings_file" ]] || return
+  [[ ${#AVAILABLE_MODELS[@]} -eq 0 ]] && return  # couldn't fetch models — skip check
+
+  local hook_model=""
+  if command -v jq &>/dev/null; then
+    hook_model="$(jq -r '.hooks.PermissionRequest[0].hooks[0].model // empty' "$settings_file" 2>/dev/null)"
+  else
+    hook_model="$(grep -o '"model"[[:space:]]*:[[:space:]]*"[^"]*"' "$settings_file" | head -1 | sed 's/"model"[[:space:]]*:[[:space:]]*"//;s/"$//')"
+  fi
+
+  [[ -z "$hook_model" ]] && return
+
+  local found=false
+  local entry
+  for entry in "${AVAILABLE_MODELS[@]}"; do
+    if [[ "${entry%%|*}" == "$hook_model" ]]; then
+      found=true
+      break
+    fi
+  done
+
+  if [[ "$found" == false ]]; then
+    warn "PermissionRequest hook uses '$hook_model' — this model is no longer available."
+    printf "    → Update ${CYAN}%s/.claude/settings.json${RESET} with a current model.\n" "$repo_path"
+    printf "    → Recommended replacements (from live model list):\n"
+    for entry in "${AVAILABLE_MODELS[@]}"; do
+      local mid="${entry%%|*}"
+      if [[ "$mid" == *opus* ]]; then
+        printf "        %s\n" "$mid"
+      fi
+    done
+    echo ""
+  else
+    ok "Hook model '$hook_model' is available"
+  fi
+}
+
+step "4/5 — Verifying PermissionRequest hook model"
+_check_hook_model
+
+# Step 5: Parse tasks.conf (INI-style blocks) and spawn agents
 tasks_file="$repo_path/tasks.conf"
+total_tasks=$(grep -c '^\[task\]' "$tasks_file" 2>/dev/null || echo "0")
+
+step "5/5 — Spawning agents  (${total_tasks} task block(s) found in tasks.conf)"
+
 agent_index=0
 agent_count=0
 
@@ -112,6 +169,7 @@ agent_count=0
 
 _spawn_current_task() {
   local branch="$1" model="$2" mode="$3" prompt="$4"
+  local task_num=$((agent_count + 1))
 
   # Prompt must be non-empty
   if [[ -z "$prompt" ]]; then
@@ -120,13 +178,10 @@ _spawn_current_task() {
   fi
 
   # Auto-generate branch from task if empty
+  local branch_note=""
   if [[ -z "$branch" ]]; then
     branch="$(slugify "$prompt")"
-  fi
-
-  # Prompt for model if empty
-  if [[ -z "$model" ]]; then
-    model="$(pick_model "$prompt" "$branch")"
+    branch_note="  (auto-generated)"
   fi
 
   # Default mode to normal
@@ -140,8 +195,23 @@ _spawn_current_task() {
     mode="normal"
   fi
 
+  # Print task summary box
+  echo ""
+  printf "  ${BOLD}── Task %d of %s ───────────────────────────────────────────${RESET}\n" \
+    "$task_num" "$total_tasks"
+  printf "  ${BOLD}Prompt${RESET} : %s\n" "$prompt"
+  printf "  ${BOLD}Branch${RESET} : %s%s\n" "$branch" "$branch_note"
+  printf "  ${BOLD}Mode${RESET}   : %s\n" "$mode"
+
+  # Pick model if not specified
+  if [[ -z "$model" ]]; then
+    printf "  ${BOLD}Model${RESET}  : (choose below)\n"
+    model="$(pick_model "$prompt" "$branch")"
+  fi
+  printf "  ${BOLD}Model${RESET}  : %s\n" "$model"
+  echo ""
+
   # Spawn the agent
-  info "Spawning agent ${agent_index}: ${branch} (${model}, ${mode})"
   "$SCRIPT_DIR/spawn-agent.sh" "$repo_path" "$branch" "$model" "$mode" "$agent_index" "$prompt"
 
   agent_index=$((agent_index + 1))

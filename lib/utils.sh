@@ -14,10 +14,11 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-info()  { printf "${CYAN}▸${RESET} %s\n" "$*"; }
-ok()    { printf "${GREEN}✓${RESET} %s\n" "$*"; }
-warn()  { printf "${YELLOW}⚠${RESET} %s\n" "$*" >&2; }
-die()   { printf "${RED}✗${RESET} %s\n" "$*" >&2; exit 1; }
+info()  { printf "  ${CYAN}▸${RESET} %s\n" "$*"; }
+ok()    { printf "  ${GREEN}✓${RESET} %s\n" "$*"; }
+warn()  { printf "  ${YELLOW}⚠${RESET}  %s\n" "$*" >&2; }
+die()   { printf "  ${RED}✗${RESET} %s\n" "$*" >&2; exit 1; }
+step()  { printf "\n${BOLD}${CYAN}▶  %s${RESET}\n" "$*"; }
 
 # ─── Window color palette ───────────────────────────────────────────────────
 
@@ -203,21 +204,17 @@ pick_model() {
   local task_prompt="$1"
   local branch_name="$2"
 
-  # Print context to stderr so it doesn't pollute the captured output
+  # Print model list to stderr so it doesn't pollute the captured output
   {
     echo ""
-    printf "${BOLD}─────────────────────────────────────────${RESET}\n"
-    printf "  Task  : %s\n" "$task_prompt"
-    printf "  Branch: %s\n" "$branch_name"
-    echo ""
-    printf "  Available models:\n"
+    printf "  ${BOLD}Available models:${RESET}\n"
 
     local i=1
     for entry in "${AVAILABLE_MODELS[@]}"; do
       local model_id="${entry%%|*}"
       local display_name="${entry#*|}"
       printf "    %d) %s  —  %s\n" "$i" "$model_id" "$display_name"
-      ((i++))
+      i=$((i + 1))
     done
 
     echo ""

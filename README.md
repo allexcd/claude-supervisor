@@ -62,7 +62,15 @@ your-project/
     CLAUDE.md                # Project memory — shared by all agents
     settings.json            # PermissionRequest → Opus hook
     agents/
-      techdebt.md            # Starter subagent for debt reduction
+      reviewer.md            # Code review subagent
+      debugger.md            # Debugging and root cause analysis subagent
+      test-writer.md         # Test writing subagent
+      _example-agent.md      # Blank template — copy to create your own
+    commands/
+      techdebt.md            # /techdebt — find and fix technical debt
+      explain.md             # /explain — explain code with the why
+      diagram.md             # /diagram — draw ASCII architecture diagrams
+      learn.md               # /learn — Socratic learning session
 ```
 
 The supervisor then exits with instructions.
@@ -190,9 +198,12 @@ tmux attach -t your-project-agents
 
 Switch between windows with `Ctrl+b n` / `Ctrl+b p`. Each window shows a banner and the live Claude session.
 
-**Step 5:** After agents finish, open a PR per branch and merge:
+**Step 5:** After agents finish, collect learnings, open PRs, and clean up:
 
 ```bash
+# Collect any CLAUDE.md updates agents made, before removing worktrees
+bash /path/to/claude-supervisor/bin/collect-learnings.sh your-project
+
 # Review what each agent did
 git -C your-project diff main..add-ungroup-all-functionality
 git -C your-project diff main..rename-tab-titles-using-ai
@@ -329,16 +340,25 @@ Useful commands inside an agent:
 Each agent works on its own branch. Open a PR per branch, review it, merge it. Worktrees are created at `../your-project-<branch>/` alongside your project directory.
 
 ```bash
-# List all active worktrees and branches
+# 1. Collect agent learnings back into the main CLAUDE.md (before removing worktrees!)
+bash /path/to/claude-supervisor/bin/collect-learnings.sh /path/to/your-project
+
+# 2. Commit the updated CLAUDE.md
+git -C /path/to/your-project add .claude/CLAUDE.md
+git -C /path/to/your-project commit -m "docs: merge agent learnings"
+
+# 3. List all active worktrees and branches
 git worktree list
 
-# Open a PR for a branch (requires gh CLI)
+# 4. Open a PR for a branch (requires gh CLI)
 gh pr create --head feature-auth --base main \
   --title "Feature: OAuth2 login" --body "Implemented by Claude agent"
 
-# After the PR is merged, remove the worktree
+# 5. After the PR is merged, remove the worktree
 git worktree remove ../your-project-feature-auth
 ```
+
+> **Important:** Run `collect-learnings.sh` _before_ `git worktree remove`. Once a worktree is gone, its CLAUDE.md updates are gone with it.
 
 ---
 
@@ -362,11 +382,26 @@ Agent continues on Haiku
 
 Opus is the gatekeeper, not the worker. The bulk of compute stays on cheap models.
 
+**When models are deprecated:**
+
+Anthropic periodically retires old model IDs. If `.claude/settings.json` still references a deprecated model, the `PermissionRequest` hook fails silently — risky actions go through ungated, with no error visible to you.
+
+The supervisor detects this automatically. On every normal run it checks whether the hook model is still in the live model list:
+
+```
+⚠  PermissionRequest hook uses 'claude-opus-4-6' — this model is no longer available.
+   → Update .claude/settings.json with a current model.
+   → Recommended replacements (from live model list):
+       claude-opus-5-0
+```
+
+When you see this warning, open `.claude/settings.json` in your project and update the `"model"` field to the model shown. The supervisor fetches the list live so the suggestion is always current.
+
 ---
 
 ## Project Memory (CLAUDE.md)
 
-`.claude/CLAUDE.md` is copied into every worktree. Every agent reads it. Fill in:
+`.claude/CLAUDE.md` is copied into every worktree. Every agent reads it automatically at session start. Fill in:
 
 - **Project Overview** — what it does, stack, entry point
 - **Conventions** — style, naming, tests, branching
@@ -374,20 +409,56 @@ Opus is the gatekeeper, not the worker. The bulk of compute stays on cheap model
 
 When an agent makes a mistake and gets corrected, it should add a note to Known Pitfalls. The next agent spawned will inherit that knowledge automatically.
 
+### Syncing learnings back to the main repo
+
+Each worktree gets its own **copy** of CLAUDE.md. Updates an agent makes are local to that worktree — the main repo's copy is not automatically updated. When you remove a worktree, any unsynced knowledge is lost.
+
+**Why agents don't update the main CLAUDE.md directly:**
+
+- **Race conditions** — Multiple agents run in parallel. If they all wrote to the same file simultaneously, you'd get conflicts and corruption.
+- **Isolation** — Worktrees are separate git checkouts on separate branches. An agent reaching into the main repo's working directory to modify files would break the isolation model that makes parallel work safe.
+- **Review gate** — Not every agent-discovered "pitfall" is correct or relevant. The owner should review before merging into the shared memory that all future agents inherit.
+
+**The fix — two steps:**
+
+1. Tell agents to commit their CLAUDE.md changes with the rest of their work. The template already includes this instruction in the Agent Instructions section.
+
+2. Before removing worktrees, run `collect-learnings.sh` to diff each worktree's CLAUDE.md against the main and apply the new lines:
+
+```bash
+# Interactive — prompts for each worktree
+bash /path/to/claude-supervisor/bin/collect-learnings.sh /path/to/your-project
+
+# Non-interactive — auto-approve all merges (CI, scripts, testing)
+bash /path/to/claude-supervisor/bin/collect-learnings.sh --yes /path/to/your-project
+```
+
+The script walks all active worktrees, shows any new lines, and asks whether to apply each one (unless `--yes` is passed). New Known Pitfalls bullets are inserted into the correct section; other additions are appended at the end. Then commit the result:
+
+```bash
+git -C /path/to/your-project add .claude/CLAUDE.md
+git -C /path/to/your-project commit -m "docs: merge agent learnings"
+```
+
+This is the step that turns individual agent corrections into shared project memory.
+
 ---
 
 ## Custom Subagents
 
-Drop `.md` files into `.claude/agents/` to define specialized subagents. Each file has YAML frontmatter + a system prompt. Claude Code reads these automatically.
+Subagents are defined in `.claude/agents/` — each file has YAML frontmatter and a system prompt. Claude Code reads them automatically at session start.
 
-A starter `techdebt.md` is included. Add your own:
+**How delegation works:** Claude automatically delegates tasks based on the task description in your request, the `description` field in subagent configurations, and current context. That's why the `description:` needs to be specific and concrete — it's essentially a routing rule. You can also add `"Use proactively"` in the description to make the agent trigger more aggressively. You can also force it explicitly: *"Use the debugger subagent to look at this error."*
 
-| File | Purpose |
+Three subagents are included out of the box:
+
+| Agent | Purpose |
 |---|---|
-| `code-reviewer.md` | Reviews changes for quality, security, and best practices |
-| `test-writer.md` | Writes tests for a given function or module |
-| `migration-planner.md` | Plans and writes database migrations |
-| `security-reviewer.md` | Scans for OWASP issues and vulnerable patterns |
+| `reviewer.md` | Reviews code before a PR — flags critical issues, minor problems, and nits. Ends with APPROVE / REQUEST CHANGES. |
+| `debugger.md` | Diagnoses errors and failures, traces root causes, applies minimal fixes. |
+| `test-writer.md` | Writes unit and integration tests matching the project's existing style. |
+
+`_example-agent.md` is a blank template you can copy to create your own. Add as many as you need — each focused on one job.
 
 Any agent can delegate to a subagent via the `/agents` command or the `Task` tool.
 
@@ -422,6 +493,7 @@ claude-supervisor/
   bin/
     supervisor.sh              # Entry point — run this
     spawn-agent.sh             # Single agent launcher (also standalone)
+    collect-learnings.sh       # Merge CLAUDE.md updates from worktrees back to main
   lib/
     utils.sh                   # Shared functions (both scripts source this)
   templates/                   # Internal — never edit directly
@@ -430,7 +502,15 @@ claude-supervisor/
     .claude/
       settings.json            # PermissionRequest → Opus hook
       agents/
-        techdebt.md            # Starter subagent
+        reviewer.md            # Code review subagent
+        debugger.md            # Debugging subagent
+        test-writer.md         # Test writing subagent
+        _example-agent.md      # Blank template
+      commands/
+        techdebt.md            # /techdebt skill
+        explain.md             # /explain skill
+        diagram.md             # /diagram skill
+        learn.md               # /learn skill
 ```
 
 ---
@@ -496,19 +576,23 @@ The "prove this works" pattern is especially useful. A reviewer agent that has t
 
 ### Turning repeat work into skills
 
-If you do something more than once a week, wrap it in a subagent. Drop a `.md` file into `.claude/agents/` and invoke it with `/agents` from any session.
+There are two places to put reusable work:
 
-Examples beyond the included `techdebt.md`:
+- **`.claude/commands/`** — slash commands you invoke yourself (`/techdebt`, `/explain`, `/diagram`, `/learn`). Use for workflows you trigger intentionally.
+- **`.claude/agents/`** — subagents Claude delegates to automatically based on the task. Use for specialized roles (reviewer, debugger, test writer).
 
-| Skill | What the agent does |
+If you do something more than once a week, it belongs in one of these. The rule of thumb: if *you* decide when to run it, it's a command. If *Claude* should decide when to delegate it, it's a subagent.
+
+More ideas for commands:
+
+| Command | What it does |
 |---|---|
-| `code-reviewer.md` | Reviews a diff, flags OWASP issues and fragile patterns |
-| `test-writer.md` | Writes unit and integration tests for a given module |
-| `db-query.md` | Writes and runs queries against your database CLI |
-| `pr-description.md` | Reads the diff and writes a detailed PR description |
+| `pr-description.md` | Reads the diff and writes a detailed PR body |
+| `changelog.md` | Summarizes commits since the last tag into a CHANGELOG entry |
 | `onboarding.md` | Generates an HTML walkthrough of a module for a new engineer |
+| `db-query.md` | Writes and runs queries against your database CLI |
 
-The analytics pattern deserves special mention: give the agent access to any DB with a CLI (`psql`, `sqlite3`, `bq`, etc.) and describe your intent in plain English. You stop writing queries and start describing outcomes.
+The database pattern deserves special mention: give the agent access to any DB with a CLI (`psql`, `sqlite3`, `bq`, etc.) and describe your intent in plain English. You stop writing queries and start describing outcomes.
 
 ---
 
@@ -516,9 +600,15 @@ The analytics pattern deserves special mention: give the agent access to any DB 
 
 Enable explanatory output for any agent session via `/config` → output style → Explanatory. The agent will explain the *why* behind every change it makes, not just the *what*.
 
-Other prompts that accelerate understanding:
+Four built-in skills accelerate understanding:
 
-> *"Before you touch anything, draw an ASCII diagram of how this module works and how data flows through it."*
+| Command | What it does |
+|---|---|
+| `/explain` | Explains what a file or function does, why it exists, and how it fits in |
+| `/diagram` | Draws an ASCII diagram of the architecture, data flow, or call chain |
+| `/learn` | Starts a Socratic learning session — you explain, Claude asks follow-ups, saves a summary |
+
+Ad-hoc prompts that also work well:
 
 > *"Generate an HTML presentation of this codebase I can step through like slides — one concept per slide."*
 

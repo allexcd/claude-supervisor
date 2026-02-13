@@ -24,6 +24,11 @@ mode="$4"
 agent_index="$5"
 task_prompt="$6"
 
+# Per-agent labeled output helpers
+AGENT_LABEL="[${branch_name}]"
+agent_info() { printf "    ${CYAN}%s${RESET} ▸ %s\n" "$AGENT_LABEL" "$*"; }
+agent_ok()   { printf "    ${GREEN}%s${RESET} ✓ %s\n" "$AGENT_LABEL" "$*"; }
+
 # ─── Validate repo ──────────────────────────────────────────────────────────
 
 if ! git -C "$repo_path" rev-parse --git-dir &>/dev/null; then
@@ -42,34 +47,35 @@ worktree_path="${repo_parent}/${repo_name}-${branch_name}"
 # ─── Create worktree ────────────────────────────────────────────────────────
 
 if [[ -d "$worktree_path" ]]; then
-  info "Worktree already exists at $worktree_path, skipping creation"
+  agent_info "Worktree already exists — reusing $worktree_path"
 else
   # Check if branch already exists
   if git -C "$repo_path" show-ref --verify --quiet "refs/heads/$branch_name" 2>/dev/null; then
-    info "Creating worktree for existing branch: $branch_name"
+    agent_info "Creating worktree for existing branch: $branch_name"
     git -C "$repo_path" worktree add "$worktree_path" "$branch_name"
   else
-    info "Creating worktree with new branch: $branch_name"
+    agent_info "Creating worktree with new branch: $branch_name"
     git -C "$repo_path" worktree add -b "$branch_name" "$worktree_path"
   fi
-  ok "Worktree created at $worktree_path"
+  agent_ok "Worktree ready at $worktree_path"
 fi
 
 # ─── Copy .claude/ directory ────────────────────────────────────────────────
 
 if [[ -d "$repo_path/.claude" ]]; then
-  # Remove old copy to ensure fresh state
+  agent_info "Copying .claude/ into worktree  (CLAUDE.md, agents/, commands/, settings.json)"
   rm -rf "$worktree_path/.claude"
   cp -r "$repo_path/.claude" "$worktree_path/.claude"
-  ok "Copied .claude/ into worktree"
+  agent_ok "Config ready"
 else
-  info "No .claude/ directory in repo — skipping copy"
+  agent_info "No .claude/ directory in repo — skipping copy"
 fi
 
 # ─── Tmux setup ─────────────────────────────────────────────────────────────
 
 session="${repo_name}-agents"
 
+agent_info "Opening tmux window in session: $session"
 if [[ -n "${TMUX:-}" ]]; then
   # Already inside tmux — add a new window
   tmux new-window -t "$session" -n "$branch_name" -c "$worktree_path" 2>/dev/null \
@@ -121,4 +127,4 @@ chmod +x "$startup_script"
 
 tmux send-keys -t "${session}:${branch_name}" "bash \"${startup_script}\"" Enter
 
-ok "Agent spawned: ${branch_name} (${model_id}, ${mode} mode)"
+agent_ok "Agent ready — model: ${model_id}  mode: ${mode}"

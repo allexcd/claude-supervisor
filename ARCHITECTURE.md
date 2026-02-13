@@ -10,13 +10,20 @@ each working on a separate task with a chosen model.
 ## Component Map
 
 ```
-bin/supervisor.sh                  # Entry point — auto-init on first run, then orchestrates agents
-bin/spawn-agent.sh                 # Spawns a single agent (branch + worktree + tmux + claude)
-lib/utils.sh                       # Shared functions (sourced by both scripts)
-templates/tasks.conf               # Scaffolded into target project on first run
-templates/CLAUDE.md                # Scaffolded into target project .claude/ on first run
-templates/.claude/settings.json    # PermissionRequest → Opus hook (scaffolded on first run)
-templates/.claude/agents/          # Placeholder for custom subagents (scaffolded on first run)
+bin/supervisor.sh                        # Entry point — auto-init on first run, then orchestrates agents
+bin/spawn-agent.sh                       # Spawns a single agent (branch + worktree + tmux + claude)
+lib/utils.sh                             # Shared functions (sourced by both scripts)
+templates/tasks.conf                     # Scaffolded into target project on first run
+templates/CLAUDE.md                      # Scaffolded into target project .claude/ on first run
+templates/.claude/settings.json          # PermissionRequest → Opus hook (scaffolded on first run)
+templates/.claude/agents/reviewer.md     # Code review subagent (auto-delegated by agent)
+templates/.claude/agents/debugger.md     # Debugging subagent (auto-delegated by agent)
+templates/.claude/agents/test-writer.md  # Test writing subagent (auto-delegated by agent)
+templates/.claude/agents/_example-agent.md # Blank template for user-defined subagents
+templates/.claude/commands/techdebt.md   # /techdebt skill (user-invoked)
+templates/.claude/commands/explain.md    # /explain skill (user-invoked)
+templates/.claude/commands/diagram.md    # /diagram skill (user-invoked)
+templates/.claude/commands/learn.md      # /learn skill (user-invoked)
 ```
 
 ### What the user actually runs
@@ -43,7 +50,62 @@ The user never touches git branches, worktrees, or file copying.
 
 ---
 
-## Flow Diagram
+## System Overview
+
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║                         supervisor.sh                                ║
+║                                                                      ║
+║   reads tasks.conf  →  for each [task] block:                       ║
+║     - create git branch + worktree                                   ║
+║     - copy .claude/ into worktree                                    ║
+║     - open tmux window                                               ║
+║     - launch claude CLI                                              ║
+╚══════════╤═══════════════════════╤════════════════════════╤═════════╝
+           │                       │                        │
+           ▼                       ▼                        ▼
+  ┌────────────────┐    ┌────────────────┐       ┌────────────────┐
+  │  tmux window 0 │    │  tmux window 1 │  ...  │  tmux window N │
+  │  ─────────────  │    │  ─────────────  │       │  ─────────────  │
+  │  claude CLI    │    │  claude CLI    │       │  claude CLI    │
+  │  task: "..."   │    │  task: "..."   │       │  task: "..."   │
+  │  branch: ...   │    │  branch: ...   │       │  branch: ...   │
+  │  worktree: ./  │    │  worktree: ./  │       │  worktree: ./  │
+  └───────┬────────┘    └────────────────┘       └────────────────┘
+          │
+          │  Inside each agent session:
+          │
+          ├── reads ── .claude/CLAUDE.md          (project memory, known pitfalls)
+          │
+          ├── AUTO-DELEGATES TO ── .claude/agents/
+          │         (agent decides when based on description: field)
+          │         ├── reviewer.md    — code review before PR
+          │         ├── debugger.md    — errors and root cause analysis
+          │         ├── test-writer.md — writing unit/integration tests
+          │         └── _example-agent.md (blank template)
+          │
+          ├── USER-INVOKED ── .claude/commands/
+          │         (you type /command in the tmux window)
+          │         ├── /techdebt  — find and fix technical debt
+          │         ├── /explain   — explain what code does and why
+          │         ├── /diagram   — draw ASCII architecture diagrams
+          │         └── /learn     — Socratic learning session
+          │
+          └── RISKY ACTION ── .claude/settings.json
+                    PermissionRequest hook fires
+                    └── claude-opus-4-6 evaluates: allow / deny
+```
+
+**Two triggering mechanisms:**
+
+| Mechanism | Who triggers it | How |
+|---|---|---|
+| **Sub-agents** (`.claude/agents/`) | The agent itself, automatically | Agent reads the `description:` of each agent and delegates when the task matches. You can also force it: *"Use the debugger agent."* |
+| **Commands / Skills** (`.claude/commands/`) | You, explicitly | Type `/techdebt`, `/explain`, `/diagram`, or `/learn` inside the tmux window at any point during the session. |
+
+---
+
+## Detailed Flow Diagram
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'linear'}}}%%
@@ -212,6 +274,8 @@ Copied into every worktree at agent spawn time. This is the project's memory —
 
 Copied into every worktree. Configures the `PermissionRequest` hook: when a cheap agent needs permission for a risky action, Opus evaluates it instead of interrupting the user.
 
+**Model deprecation risk:** The `"model"` field is hardcoded. When Anthropic deprecates a model ID, the hook fails silently — the permission request goes through without evaluation. The supervisor guards against this: after `fetch_models` it checks whether the model in `settings.json` is still in the live model list. If not, it prints a warning and lists current Opus models as replacements. Users update the one field in their project's `.claude/settings.json` when this happens.
+
 ```json
 {
   "hooks": {
@@ -235,33 +299,31 @@ Copied into every worktree. Configures the `PermissionRequest` hook: when a chea
 
 ### `templates/.claude/agents/` → `<project>/.claude/agents/`
 
-Each `.md` file in this directory defines a **custom subagent** — a specialized Claude Code agent with its own system prompt, tool access, and description. Claude Code reads these automatically. Any agent can delegate narrow tasks to a subagent via the `Task` tool instead of handling everything in its own context.
+Each `.md` file defines a **subagent** — a specialized Claude instance with its own system prompt, tool access, and `description:` field. Claude Code reads these automatically at session start. The agent delegates to them based on the `description:` field — no user action required.
 
 Every worktree gets a copy of this directory, so all spawned agents share the same subagent pool.
 
-**Shipped starter — `techdebt.md`:**
+**Shipped subagents:**
 
-```markdown
----
-name: techdebt
-description: Use when asked to find technical debt, remove duplicated code, simplify over-engineered logic, or clean up dead code. Not for feature work.
-tools: [Read, Glob, Grep, Edit, Write, Bash]
----
+| File | `description:` trigger | Tools |
+|---|---|---|
+| `reviewer.md` | Reviews code before PR — flags issues, ends with APPROVE / REQUEST CHANGES | Read, Glob, Grep, Bash |
+| `debugger.md` | Errors, failures, unexpected behavior — root cause + minimal fix | Read, Glob, Grep, Edit, Bash |
+| `test-writer.md` | Writing unit/integration tests for a module or function | Read, Glob, Grep, Edit, Write, Bash |
+| `_example-agent.md` | Blank template — copy and fill in `name:`, `description:`, `tools:`, body | — |
 
-You are a senior engineer specializing in code quality and debt reduction.
-Find duplicated logic, dead code, and over-engineered abstractions.
-Consolidate without changing external behaviour.
-Always explain WHY a change reduces debt. Run tests after each change.
-```
+### `templates/.claude/commands/` → `<project>/.claude/commands/`
 
-**Other agents users can add:**
+Each `.md` file defines a **skill** (slash command) — invoked by the user with `/command-name` inside any Claude session. Unlike subagents, skills run in the main agent's context and are always user-triggered.
 
-| File | Purpose |
-|---|---|
-| `code-reviewer.md` | Reviews changes for quality, security, and best practices |
-| `test-writer.md` | Writes tests for a given function or module |
-| `migration-planner.md` | Plans and writes database migrations |
-| `security-reviewer.md` | Scans for OWASP issues and vulnerable patterns |
+**Shipped commands:**
+
+| File | Invoked with | What it does |
+|---|---|---|
+| `techdebt.md` | `/techdebt` | Finds and fixes duplicated code, dead code, over-engineering |
+| `explain.md` | `/explain` | Explains code: what/why/how/fits-in/gotchas |
+| `diagram.md` | `/diagram` | Draws ASCII diagrams of architecture, data flow, or call chains |
+| `learn.md` | `/learn` | Socratic session — you explain, Claude asks follow-ups, saves a summary |
 
 ---
 
@@ -299,6 +361,16 @@ When `spawn-agent.sh` creates a worktree it copies `CLAUDE.md` from the main rep
 > **Update CLAUDE.md if you make a correction — so the next agent doesn't repeat the same mistake.**
 
 Over time, CLAUDE.md accumulates project-specific constraints, patterns, and known pitfalls that all agents inherit automatically.
+
+### Why agents update only their worktree's copy
+
+Agents do **not** write back to the main repo's `.claude/CLAUDE.md`. This is intentional:
+
+1. **Race conditions** — Multiple agents run in parallel. Concurrent writes to the same file would cause conflicts and corruption.
+2. **Branch isolation** — Each worktree is a separate git checkout on its own branch. Reaching across into the main repo's working directory to modify files would violate the isolation that makes parallel work safe.
+3. **Review gate** — Not every agent-discovered pitfall is correct or relevant. The owner should review before merging into the shared memory that all future agents inherit.
+
+The reconciliation path is deliberate: agents commit CLAUDE.md changes with their branch work, and the owner runs `collect-learnings.sh [--yes] <repo>` to diff all worktrees against main and selectively merge new lines back. Use `--yes` to auto-approve all merges (useful in CI or scripts). Once merged, commit the updated main CLAUDE.md. Only then can worktrees be safely purged.
 
 ---
 

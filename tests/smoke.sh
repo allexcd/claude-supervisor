@@ -143,7 +143,14 @@ assert_file_exists ".claude/ created" "$test_repo/.claude"
 assert_file_exists ".claude/CLAUDE.md created" "$test_repo/.claude/CLAUDE.md"
 assert_file_exists ".claude/settings.json created" "$test_repo/.claude/settings.json"
 assert_file_exists ".claude/agents/ created" "$test_repo/.claude/agents"
-assert_file_exists ".claude/agents/techdebt.md created" "$test_repo/.claude/agents/techdebt.md"
+assert_file_exists ".claude/agents/reviewer.md created" "$test_repo/.claude/agents/reviewer.md"
+assert_file_exists ".claude/agents/debugger.md created" "$test_repo/.claude/agents/debugger.md"
+assert_file_exists ".claude/agents/test-writer.md created" "$test_repo/.claude/agents/test-writer.md"
+assert_file_exists ".claude/commands/ created" "$test_repo/.claude/commands"
+assert_file_exists ".claude/commands/techdebt.md created" "$test_repo/.claude/commands/techdebt.md"
+assert_file_exists ".claude/commands/explain.md created" "$test_repo/.claude/commands/explain.md"
+assert_file_exists ".claude/commands/diagram.md created" "$test_repo/.claude/commands/diagram.md"
+assert_file_exists ".claude/commands/learn.md created" "$test_repo/.claude/commands/learn.md"
 assert_contains "init message mentions tasks.conf" "tasks.conf" "$output"
 
 # Verify file contents are not empty
@@ -371,7 +378,14 @@ echo "──────────────"
 assert_file_exists "templates/tasks.conf exists" "$PROJECT_ROOT/templates/tasks.conf"
 assert_file_exists "templates/CLAUDE.md exists" "$PROJECT_ROOT/templates/CLAUDE.md"
 assert_file_exists "templates/.claude/settings.json exists" "$PROJECT_ROOT/templates/.claude/settings.json"
-assert_file_exists "templates/.claude/agents/techdebt.md exists" "$PROJECT_ROOT/templates/.claude/agents/techdebt.md"
+assert_file_exists "templates/.claude/agents/reviewer.md exists" "$PROJECT_ROOT/templates/.claude/agents/reviewer.md"
+assert_file_exists "templates/.claude/agents/debugger.md exists" "$PROJECT_ROOT/templates/.claude/agents/debugger.md"
+assert_file_exists "templates/.claude/agents/test-writer.md exists" "$PROJECT_ROOT/templates/.claude/agents/test-writer.md"
+assert_file_exists "templates/.claude/agents/_example-agent.md exists" "$PROJECT_ROOT/templates/.claude/agents/_example-agent.md"
+assert_file_exists "templates/.claude/commands/techdebt.md exists" "$PROJECT_ROOT/templates/.claude/commands/techdebt.md"
+assert_file_exists "templates/.claude/commands/explain.md exists" "$PROJECT_ROOT/templates/.claude/commands/explain.md"
+assert_file_exists "templates/.claude/commands/diagram.md exists" "$PROJECT_ROOT/templates/.claude/commands/diagram.md"
+assert_file_exists "templates/.claude/commands/learn.md exists" "$PROJECT_ROOT/templates/.claude/commands/learn.md"
 
 # Verify tasks.conf uses INI block format
 tasks_conf_content="$(cat "$PROJECT_ROOT/templates/tasks.conf")"
@@ -383,11 +397,16 @@ settings_content="$(cat "$PROJECT_ROOT/templates/.claude/settings.json")"
 assert_contains "settings.json has PermissionRequest hook" "PermissionRequest" "$settings_content"
 assert_contains "settings.json routes to Opus" "claude-opus-4-6" "$settings_content"
 
-# Verify techdebt.md has required frontmatter
-techdebt_content="$(cat "$PROJECT_ROOT/templates/.claude/agents/techdebt.md")"
-assert_contains "techdebt.md has name field" "name: techdebt" "$techdebt_content"
+# Verify techdebt.md (command) has required frontmatter
+techdebt_content="$(cat "$PROJECT_ROOT/templates/.claude/commands/techdebt.md")"
 assert_contains "techdebt.md has description" "description:" "$techdebt_content"
-assert_contains "techdebt.md has tools" "tools:" "$techdebt_content"
+assert_contains "techdebt.md has allowed-tools" "allowed-tools:" "$techdebt_content"
+
+# Verify reviewer.md (subagent) has required frontmatter
+reviewer_content="$(cat "$PROJECT_ROOT/templates/.claude/agents/reviewer.md")"
+assert_contains "reviewer.md has name field" "name: reviewer" "$reviewer_content"
+assert_contains "reviewer.md has description" "description:" "$reviewer_content"
+assert_contains "reviewer.md has tools" "tools:" "$reviewer_content"
 
 # ─── Test: scripts are executable ────────────────────────────────────────────
 
@@ -406,6 +425,94 @@ if [[ -x "$PROJECT_ROOT/bin/spawn-agent.sh" ]]; then
 else
   fail "spawn-agent.sh is not executable"
 fi
+
+if [[ -x "$PROJECT_ROOT/bin/collect-learnings.sh" ]]; then
+  pass "collect-learnings.sh is executable"
+else
+  fail "collect-learnings.sh is not executable"
+fi
+
+# ─── Test: collect-learnings.sh ──────────────────────────────────────────────
+
+echo ""
+echo "collect-learnings"
+echo "─────────────────"
+
+# Set up a repo with a worktree that has new CLAUDE.md lines
+cl_repo="/tmp/claude-cl-test-$$"
+mkdir -p "$cl_repo"
+git -C "$cl_repo" init -b main &>/dev/null
+git -C "$cl_repo" config user.email "test@test.com" &>/dev/null
+git -C "$cl_repo" config user.name "Test" &>/dev/null
+mkdir -p "$cl_repo/.claude"
+cat > "$cl_repo/.claude/CLAUDE.md" <<'CLAUDE'
+# Project Memory
+
+## Known Pitfalls
+- existing pitfall
+
+---
+CLAUDE
+git -C "$cl_repo" add . &>/dev/null
+git -C "$cl_repo" commit -m "init" &>/dev/null
+
+# Create a worktree with updated CLAUDE.md
+git -C "$cl_repo" worktree add "/tmp/claude-cl-test-$$-wt" -b "agent-branch" &>/dev/null
+mkdir -p "/tmp/claude-cl-test-$$-wt/.claude"
+cat > "/tmp/claude-cl-test-$$-wt/.claude/CLAUDE.md" <<'CLAUDE'
+# Project Memory
+
+## Known Pitfalls
+- existing pitfall
+- new pitfall added by agent
+
+---
+CLAUDE
+
+# Verify collect-learnings sees the diff (use --yes for non-interactive approval)
+cl_output="$(bash "$PROJECT_ROOT/bin/collect-learnings.sh" --yes "$cl_repo" 2>&1)" || true
+
+assert_contains "collect-learnings detects new line" "new pitfall added by agent" "$cl_output"
+assert_contains "collect-learnings reports merge" "pitfall bullet" "$cl_output"
+
+# The --yes run already merged; verify the pitfall was written to main CLAUDE.md
+main_content="$(cat "$cl_repo/.claude/CLAUDE.md")"
+assert_contains "new pitfall merged to main CLAUDE.md" "new pitfall added by agent" "$main_content"
+
+# collect-learnings with no active worktrees (after list is empty)
+# Use a fresh repo with no worktrees
+cl_repo2="/tmp/claude-cl-test2-$$"
+mkdir -p "$cl_repo2"
+git -C "$cl_repo2" init -b main &>/dev/null
+git -C "$cl_repo2" config user.email "test@test.com" &>/dev/null
+git -C "$cl_repo2" config user.name "Test" &>/dev/null
+mkdir -p "$cl_repo2/.claude"
+echo "# CLAUDE.md" > "$cl_repo2/.claude/CLAUDE.md"
+git -C "$cl_repo2" add . &>/dev/null
+git -C "$cl_repo2" commit -m "init" &>/dev/null
+
+cl_empty="$(bash "$PROJECT_ROOT/bin/collect-learnings.sh" "$cl_repo2" 2>&1)" || true
+assert_contains "no worktrees message shown" "No active worktrees" "$cl_empty"
+
+# collect-learnings rejects non-repo
+cl_err="$(bash "$PROJECT_ROOT/bin/collect-learnings.sh" "/tmp/no-such-dir-$$" 2>&1)" && ec=$? || ec=$?
+assert_exit_code "collect-learnings rejects missing dir" "1" "$ec"
+
+# collect-learnings rejects repo with no CLAUDE.md
+cl_repo3="/tmp/claude-cl-test3-$$"
+mkdir -p "$cl_repo3"
+git -C "$cl_repo3" init -b main &>/dev/null
+git -C "$cl_repo3" config user.email "test@test.com" &>/dev/null
+git -C "$cl_repo3" config user.name "Test" &>/dev/null
+touch "$cl_repo3/README.md"
+git -C "$cl_repo3" add . &>/dev/null
+git -C "$cl_repo3" commit -m "init" &>/dev/null
+
+cl_err2="$(bash "$PROJECT_ROOT/bin/collect-learnings.sh" "$cl_repo3" 2>&1)" && ec=$? || ec=$?
+assert_exit_code "collect-learnings rejects missing CLAUDE.md" "1" "$ec"
+assert_contains "error mentions CLAUDE.md" "CLAUDE.md" "$cl_err2"
+
+rm -rf "$cl_repo" "/tmp/claude-cl-test-$$-wt" "$cl_repo2" "$cl_repo3"
 
 # ─── Cleanup ─────────────────────────────────────────────────────────────────
 

@@ -1,7 +1,6 @@
 ---
-name: techdebt
-description: Use this agent when asked to find technical debt, remove duplicated code, simplify over-engineered logic, or clean up dead code. Do not use for feature work.
-tools:
+description: Find and fix technical debt — duplicated code, dead code, and over-engineered abstractions
+allowed-tools:
   - Read
   - Glob
   - Grep
