@@ -200,7 +200,8 @@ _save_billing_mode() {
 
   if [[ -f "$env_file" ]] && grep -q '^CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=' "$env_file" 2>/dev/null; then
     # Update existing line
-    sed -i '' "s/^CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=.*/CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=${CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE}/" "$env_file"
+    local _tmp; _tmp="$(mktemp)"
+    sed "s/^CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=.*/CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=${CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE}/" "$env_file" > "$_tmp" && mv "$_tmp" "$env_file"
   elif [[ -f "$env_file" ]]; then
     # Append to existing .env
     [[ -s "$env_file" && "$(tail -c1 "$env_file")" != "" ]] && printf '\n' >> "$env_file"
