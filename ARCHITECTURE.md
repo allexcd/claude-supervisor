@@ -12,6 +12,8 @@ each working on a separate task with a chosen model.
 ```
 bin/supervisor.sh                        # Entry point — auto-init on first run, then orchestrates agents
 bin/spawn-agent.sh                       # Spawns a single agent (branch + worktree + tmux + claude)
+bin/collect-learnings.sh                 # Merges CLAUDE.md updates from worktrees back to main
+bin/setup-shortcuts.sh                   # Optional: sets up shell shortcuts (PATH or aliases in ~/.zshrc)
 lib/utils.sh                             # Shared functions (sourced by both scripts)
 templates/tasks.conf                     # Scaffolded into target project on first run
 templates/CLAUDE.md                      # Scaffolded into target project .claude/ on first run

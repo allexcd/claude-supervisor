@@ -45,12 +45,13 @@ Or the supervisor will prompt you (silent input, key never echoed).
 
 ```bash
 git clone <this-repo-url> claude-supervisor
+cd claude-supervisor
 ```
 
 ### 2. First run — scaffold config into your project
 
 ```bash
-bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/your-project
+bash bin/supervisor.sh /path/to/your-project
 ```
 
 This creates:
@@ -126,7 +127,7 @@ Blank lines and `#` comments are ignored. A `[task]` header starts a new block.
 ### 4. Run again — agents spawn
 
 ```bash
-bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/your-project
+bash bin/supervisor.sh /path/to/your-project
 ```
 
 The supervisor will:
@@ -154,11 +155,76 @@ The supervisor will:
 ─────────────────────────────────────────
 ```
 
+> **Tip:** The commands above work because you `cd`'d into the claude-supervisor directory. For daily use from anywhere, either use the full path — `bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/project` — or set up shell shortcuts (next section).
+
+---
+
+## Shell Shortcuts (Optional)
+
+If you use the supervisor frequently, you can set up shell shortcuts to avoid typing the full path every time.
+
+### Quick setup
+
+Run from the claude-supervisor directory:
+
+```bash
+bash bin/setup-shortcuts.sh
+```
+
+It will:
+- Auto-detect the installation path
+- Back up your `~/.zshrc` to `~/.zshrc.backup-YYYYMMDD-HHMMSS`
+- Let you choose between adding to **PATH** or creating **aliases** (both modify `~/.zshrc`)
+- Check if already installed (won't duplicate)
+- Reload your shell configuration automatically (if running in zsh)
+
+### PATH setup (recommended)
+
+Adds `claude-supervisor/bin` to your PATH. Then run:
+
+```bash
+supervisor.sh              # run in current directory
+supervisor.sh ~/my-project
+collect-learnings.sh --yes
+spawn-agent.sh ~/my-project fix-bug claude-sonnet-4-5-20250929 normal 0 "fix the login bug"
+```
+
+### Alias setup
+
+Creates short aliases. Then run:
+
+```bash
+supervisor              # run in current directory  
+supervisor ~/my-project
+collect-learnings --yes
+spawn-agent ~/my-project fix-bug claude-sonnet-4-5-20250929 normal 0 "fix the login bug"
+```
+
+### Manual setup
+
+If you prefer to edit `~/.zshrc` yourself:
+
+**PATH:**
+```bash
+export PATH="/path/to/claude-supervisor/bin:$PATH"
+```
+
+**Aliases:**
+```bash
+alias supervisor='bash /path/to/claude-supervisor/bin/supervisor.sh'
+alias collect-learnings='bash /path/to/claude-supervisor/bin/collect-learnings.sh'
+alias spawn-agent='bash /path/to/claude-supervisor/bin/spawn-agent.sh'
+```
+
+Then reload: `source ~/.zshrc`
+
 ---
 
 ## Example Walkthrough
 
 Assuming you have a project and want to work on two things in parallel, here's exactly what to do.
+
+> Commands below use full paths so they work from any directory. If you set up shell shortcuts, replace `bash /path/to/claude-supervisor/bin/supervisor.sh` with `supervisor`.
 
 **Your tasks:**
 1. Add an "Ungroup All" feature — removes all tab groups at once
@@ -474,6 +540,8 @@ bash /path/to/claude-supervisor/bin/spawn-agent.sh /path/to/repo my-branch claud
 
 Arguments: `<repo_path> <branch_name> <model_id> <mode> <agent_index> "<task_prompt>"`
 
+- `agent_index` — assigns a color to the tmux window (0-7 for different colors). Use `0` if spawning just one agent.
+
 This creates the worktree, copies `.claude/`, opens a tmux window, and launches Claude — same as what the supervisor does, but for a single agent.
 
 ---
@@ -494,6 +562,7 @@ claude-supervisor/
     supervisor.sh              # Entry point — run this
     spawn-agent.sh             # Single agent launcher (also standalone)
     collect-learnings.sh       # Merge CLAUDE.md updates from worktrees back to main
+    setup-shortcuts.sh         # Shell shortcuts installer (adds to ~/.zshrc)
   lib/
     utils.sh                   # Shared functions (both scripts source this)
   templates/                   # Internal — never edit directly
