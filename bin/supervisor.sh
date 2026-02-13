@@ -44,6 +44,18 @@ if [[ ! -f "$repo_path/tasks.conf" ]]; then
   cp "$TEMPLATES_DIR/tasks.conf" "$repo_path/tasks.conf"
   ok "Created tasks.conf"
 
+  # Add tasks.conf to .gitignore (personal/ephemeral — not committed)
+  gitignore="$repo_path/.gitignore"
+  if [[ -f "$gitignore" ]]; then
+    if ! grep -qx "tasks.conf" "$gitignore" 2>/dev/null; then
+      printf '\n\n# Claude Supervisor — personal task config (not shared)\ntasks.conf\n' >> "$gitignore"
+      ok "Added tasks.conf to .gitignore"
+    fi
+  else
+    printf '# Claude Supervisor — personal task config (not shared)\ntasks.conf\n' > "$gitignore"
+    ok "Created .gitignore with tasks.conf"
+  fi
+
   # Scaffold .claude/ directory (skip if already exists)
   if [[ ! -d "$repo_path/.claude" ]]; then
     mkdir -p "$repo_path/.claude/agents"

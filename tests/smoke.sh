@@ -153,6 +153,14 @@ assert_file_exists ".claude/commands/diagram.md created" "$test_repo/.claude/com
 assert_file_exists ".claude/commands/learn.md created" "$test_repo/.claude/commands/learn.md"
 assert_contains "init message mentions tasks.conf" "tasks.conf" "$output"
 
+# Verify tasks.conf is added to .gitignore
+assert_file_exists ".gitignore created" "$test_repo/.gitignore"
+if grep -qx "tasks.conf" "$test_repo/.gitignore" 2>/dev/null; then
+  pass ".gitignore contains tasks.conf"
+else
+  fail ".gitignore missing tasks.conf entry"
+fi
+
 # Verify file contents are not empty
 tasks_size=$(wc -c < "$test_repo/tasks.conf")
 if (( tasks_size > 100 )); then
@@ -192,6 +200,32 @@ assert_eq ".claude/CLAUDE.md preserved when .claude/ exists" \
   "custom content" \
   "$custom_content"
 assert_contains "warns about existing .claude/" ".claude/ directory already exists" "$output2"
+
+# Verify .gitignore was not duplicated on re-run
+gitignore_count=$(grep -cx "tasks.conf" "$test_repo/.gitignore")
+if (( gitignore_count == 1 )); then
+  pass ".gitignore tasks.conf entry not duplicated on re-run"
+else
+  fail ".gitignore has ${gitignore_count} 'tasks.conf' entries (expected 1)"
+fi
+
+# Test: scaffolding appends to existing .gitignore
+test_repo_gi="/tmp/claude-supervisor-test-gitignore-$$"
+mkdir -p "$test_repo_gi"
+git -C "$test_repo_gi" init -b main &>/dev/null
+echo "node_modules/" > "$test_repo_gi/.gitignore"
+touch "$test_repo_gi/README.md"
+git -C "$test_repo_gi" add . &>/dev/null
+git -C "$test_repo_gi" commit -m "init" &>/dev/null
+
+bash "$PROJECT_ROOT/bin/supervisor.sh" "$test_repo_gi" &>/dev/null || true
+
+if grep -q "node_modules/" "$test_repo_gi/.gitignore" && grep -qx "tasks.conf" "$test_repo_gi/.gitignore"; then
+  pass ".gitignore appended to (preserves existing entries)"
+else
+  fail ".gitignore existing content lost or tasks.conf not added"
+fi
+rm -rf "$test_repo_gi"
 
 # ─── Test: supervisor rejects non-git directory ──────────────────────────────
 

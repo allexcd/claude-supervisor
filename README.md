@@ -58,7 +58,8 @@ This creates:
 
 ```
 your-project/
-  tasks.conf                 # Define your tasks here
+  tasks.conf                 # Define your tasks here (gitignored — personal)
+  .gitignore                 # Updated to exclude tasks.conf
   .claude/
     CLAUDE.md                # Project memory — shared by all agents
     settings.json            # PermissionRequest → Opus hook
@@ -73,6 +74,18 @@ your-project/
       diagram.md             # /diagram — draw ASCII architecture diagrams
       learn.md               # /learn — Socratic learning session
 ```
+
+`tasks.conf` is automatically added to `.gitignore`. 
+
+What to commit and what to ignore:
+
+| File | Git | Why |
+|---|---|---|
+| `.claude/CLAUDE.md` | **Commit** | Shared project memory — conventions, pitfalls, context for all agents |
+| `.claude/settings.json` | **Commit** | PermissionRequest hook config — same safety gating for everyone |
+| `.claude/agents/` | **Commit** | Subagents are project tools — reviewer, debugger, test-writer |
+| `.claude/commands/` | **Commit** | Slash commands belong to the project — `/techdebt`, `/explain`, etc. |
+| `tasks.conf` | **Ignore** | Personal and ephemeral — your current batch of work. Two people running different tasks would conflict. |
 
 The supervisor then exits with instructions.
 
