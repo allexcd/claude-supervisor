@@ -12,6 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_DIR="$SCRIPT_DIR/../templates"
+VERSION="$(cat "$SCRIPT_DIR/../VERSION" 2>/dev/null || echo "unknown")"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/utils.sh"
@@ -22,8 +23,9 @@ RESET_BILLING=""
 args=()
 for arg in "$@"; do
   case "$arg" in
-    --reset) RESET_BILLING=1 ;;
-    *)       args+=("$arg") ;;
+    --reset)      RESET_BILLING=1 ;;
+    --version|-V) printf "claude-supervisor %s\n" "$VERSION"; exit 0 ;;
+    *)            args+=("$arg") ;;
   esac
 done
 export RESET_BILLING
@@ -120,7 +122,7 @@ fi
 # ─── Normal run — agents fire ───────────────────────────────────────────────
 
 echo ""
-printf "${BOLD}Claude Supervisor${RESET}\n"
+printf "${BOLD}Claude Supervisor v%s${RESET}\n" "$VERSION"
 printf "  Repo : ${CYAN}%s${RESET}\n" "$repo_path"
 
 step "1/4 — Checking dependencies"

@@ -1,0 +1,34 @@
+{
+  "name": "claude-supervisor",
+  "version": "0.1.0",
+  "description": "Spin up parallel Claude Code agents in isolated git worktrees",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexcd/claude-supervisor.git"
+  },
+  "engines": { "node": ">=18" },
+  "bin": {
+    "supervisor":           "./bin/supervisor.sh",
+    "supervisor.sh":        "./bin/supervisor.sh",
+    "spawn-agent":          "./bin/spawn-agent.sh",
+    "spawn-agent.sh":       "./bin/spawn-agent.sh",
+    "collect-learnings":    "./bin/collect-learnings.sh",
+    "collect-learnings.sh": "./bin/collect-learnings.sh"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "templates/",
+    "VERSION",
+    "LICENSE",
+    "README.md",
+    "ARCHITECTURE.md"
+  ],
+  "scripts": {
+    "test": "bash tests/smoke.sh",
+    "version": "printf '%s' \"$npm_package_version\" > VERSION && git add VERSION",
+    "prepublishOnly": "bash tests/smoke.sh"
+  },
+  "keywords": ["claude", "claude-code", "ai", "agents", "worktree", "parallel", "tmux"]
+}

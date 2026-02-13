@@ -48,6 +48,51 @@ API-key users can export the key beforehand (`export ANTHROPIC_API_KEY=sk-ant-..
 
 ---
 
+## Install via npm
+
+The supervisor is published to npm. If you already have Node.js/npm installed (required for Claude Code CLI), this is the fastest way to get started.
+
+### Option A — Global install (personal use, run from any directory)
+
+```bash
+npm install -g claude-supervisor
+supervisor.sh ~/my-project
+```
+
+### Option B — Local devDependency (teams, CI, version-locked)
+
+```json
+// your-project/package.json
+{
+  "scripts": {
+    "agents":         "supervisor.sh",
+    "agents:reset":   "supervisor.sh --reset",
+    "agents:collect": "collect-learnings.sh --yes"
+  },
+  "devDependencies": {
+    "claude-supervisor": "^0.1.0"
+  }
+}
+```
+
+```bash
+npm install          # pulls in claude-supervisor
+npm run agents       # first run → scaffolds tasks.conf + .claude/ → exits
+# edit tasks.conf
+npm run agents       # spawns agents
+```
+
+npm symlinks the bin entries into `node_modules/.bin/` and adds that directory to PATH during `npm run`. The shell scripts resolve their own location via `BASH_SOURCE[0]` which follows symlinks correctly, so `../lib/utils.sh` and `../templates/` resolve to the right place inside `node_modules/claude-supervisor/`.
+
+### Option C — Clone and run directly (no install required)
+
+```bash
+git clone <this-repo-url> claude-supervisor
+bash claude-supervisor/bin/supervisor.sh ~/my-project
+```
+
+---
+
 ## Quick Start
 
 ### 1. Clone this repo
@@ -902,6 +947,21 @@ bash tests/smoke.sh
 ```
 
 The test suite checks: `slugify`, `print_banner`, `check_deps`, auto-init scaffolding, `tasks.conf` parsing, and `spawn-agent.sh` argument validation — all without needing an API key or tmux.
+
+---
+
+## Release Workflow
+
+```bash
+# Bump version, update VERSION file, commit, and tag — all in one:
+npm version patch    # or minor / major
+npm publish          # runs smoke tests, then publishes to npm registry
+
+# Git tag is created automatically by npm version
+git push && git push --tags
+```
+
+`npm version` updates `package.json`, writes the new version to `VERSION`, stages it, and creates a git commit + tag. `npm publish` runs the smoke tests first — if they fail, the publish is aborted.
 
 ---
 
