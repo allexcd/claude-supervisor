@@ -948,6 +948,8 @@ The `agent` function with `fzf` lets you type `agent login` and jump straight to
 Smoke tests verify that all functions and scripts work correctly:
 
 ```bash
+npm test
+# or
 bash tests/smoke.sh
 ```
 
@@ -957,16 +959,21 @@ The test suite checks: `slugify`, `print_banner`, `check_deps`, auto-init scaffo
 
 ## Release Workflow
 
-```bash
-# Bump version, update VERSION file, commit, and tag — all in one:
-npm version patch    # or minor / major
-npm publish          # runs smoke tests, then publishes to npm registry
+Publishing is automated via GitHub Actions — pushing a tag triggers the CI + publish pipeline.
 
-# Git tag is created automatically by npm version
-git push && git push --tags
+```bash
+# Bump version, commit, tag, and trigger publish — all in one:
+npm run release:patch   # 0.1.2 → 0.1.3
+npm run release:minor   # 0.1.2 → 0.2.0
+npm run release:major   # 0.1.2 → 1.0.0
 ```
 
-`npm version` updates `package.json`, writes the new version to `VERSION`, stages it, and creates a git commit + tag. `npm publish` runs the smoke tests first — if they fail, the publish is aborted.
+What happens:
+1. `npm version` updates `package.json` and `VERSION`, commits, and creates a git tag
+2. `git push --tags` pushes the tag to GitHub
+3. GitHub Actions runs the smoke tests, then publishes to npm automatically
+
+No manual `npm publish` needed.
 
 ---
 
