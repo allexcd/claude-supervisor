@@ -17,8 +17,8 @@ PASS=0
 FAIL=0
 TESTS=()
 
-pass() { ((PASS++)); printf "  \033[0;32m✓\033[0m %s\n" "$1"; }
-fail() { ((FAIL++)); printf "  \033[0;31m✗\033[0m %s\n" "$1"; TESTS+=("$1"); }
+pass() { PASS=$((PASS + 1)); printf "  \033[0;32m✓\033[0m %s\n" "$1"; }
+fail() { FAIL=$((FAIL + 1)); printf "  \033[0;31m✗\033[0m %s\n" "$1"; TESTS+=("$1"); }
 
 assert_eq() {
   local label="$1" expected="$2" actual="$3"
