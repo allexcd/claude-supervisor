@@ -71,60 +71,97 @@ else
   agent_info "No .claude/ directory in repo — skipping copy"
 fi
 
-# ─── Tmux setup ─────────────────────────────────────────────────────────────
+# ─── Tmux session setup ─────────────────────────────────────────────────────
 
+agent_info "Using tmux windows for agent isolation"
 session="${repo_name}-agents"
-
-agent_info "Opening tmux window in session: $session"
-if [[ -n "${TMUX:-}" ]]; then
-  # Already inside tmux — add a new window
-  tmux new-window -t "$session" -n "$branch_name" -c "$worktree_path" 2>/dev/null \
-    || tmux new-window -n "$branch_name" -c "$worktree_path"
-else
-  # Not inside tmux — create or join session
-  if tmux has-session -t "$session" 2>/dev/null; then
-    tmux new-window -t "$session" -n "$branch_name" -c "$worktree_path"
-  else
-    tmux new-session -d -s "$session" -n "$branch_name" -c "$worktree_path"
-  fi
-fi
-
-# ─── Setup window color + title ─────────────────────────────────────────────
-
-setup_window "$session" "$branch_name" "$agent_index" "$mode"
 
 # ─── Write startup script ───────────────────────────────────────────────────
 # The script runs inside the tmux window: prints banner, launches claude, cleans up.
+# Written BEFORE creating the tmux window so the window can launch it directly.
 
 startup_script="$worktree_path/.claude-agent-start.sh"
 
 banner_text="$(print_banner "$task_prompt" "$branch_name" "$model_id" "$mode")"
 
+# Capture key value before heredoc (safe under set -u)
+_api_key_val="${ANTHROPIC_API_KEY:-}"
+
 cat > "$startup_script" <<STARTUP
 #!/usr/bin/env bash
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}"
+
+# Export API key only if using API billing
+if [[ -n "${_api_key_val}" ]]; then
+  export ANTHROPIC_API_KEY="${_api_key_val}"
+fi
+
+# Set Ghostty tab title if applicable
+if [[ "\${TERM_PROGRAM:-}" == "ghostty" ]]; then
+  printf '\033]0;${branch_name}\007'
+fi
 
 cat <<'BANNER'
 ${banner_text}
 BANNER
 
 echo ""
+printf "\033[0;36m▸\033[0m Connecting to Claude API...\n"
+printf "\033[0;36m▸\033[0m Will auto-start task in 5 seconds...\n"
+echo ""
 
 # Clean up this startup script
 rm -f "${startup_script}"
 
-# Launch claude
-if [[ "${mode}" == "plan" ]]; then
-  exec claude --model "${model_id}" --permission-mode plan -p "${task_prompt}"
-else
-  exec claude --model "${model_id}" -p "${task_prompt}"
-fi
+# Launch claude (interactive mode)
 STARTUP
+
+# Build the claude command based on what's set
+{
+  printf 'exec claude'
+  [[ -n "${model_id}" ]] && printf ' --model "%s"' "${model_id}"
+  [[ "${mode}" == "plan" ]] && printf ' --permission-mode plan'
+  printf '\n'
+} >> "$startup_script"
 
 chmod +x "$startup_script"
 
-# ─── Send startup command to tmux window ─────────────────────────────────────
+# ─── Create tmux window and launch startup script directly ──────────────────
+# Using the shell command argument instead of send-keys avoids echoing
+# the command text visibly in the terminal.
 
-tmux send-keys -t "${session}:${branch_name}" "bash \"${startup_script}\"" Enter
+agent_info "Opening tmux window in session: $session"
+if [[ -n "${TMUX:-}" ]]; then
+  # Already inside tmux — add a new window
+  tmux new-window -t "$session" -n "$branch_name" -c "$worktree_path" \
+    "bash \"${startup_script}\"" 2>/dev/null \
+    || tmux new-window -n "$branch_name" -c "$worktree_path" \
+    "bash \"${startup_script}\""
+else
+  # Not inside tmux — create or join session
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux new-window -t "$session" -n "$branch_name" -c "$worktree_path" \
+      "bash \"${startup_script}\""
+  else
+    tmux new-session -d -s "$session" -n "$branch_name" -c "$worktree_path" \
+      "bash \"${startup_script}\""
+  fi
+fi
+
+# ─── Setup window color ─────────────────────────────────────────────────────
+
+setup_window "$session" "$branch_name" "$agent_index" "$mode"
+
+# ─── Auto-paste task prompt after Claude loads ─────────────────────────────
+
+(
+  # Wait for Claude to load, then send the task prompt automatically
+  sleep 5
+  
+  # Send the task prompt to this specific window
+  # Silence errors — the window may have closed if Claude exited early
+  task_prompt_escaped=$(printf '%s' "$task_prompt" | sed 's/"/\\"/g')
+  tmux send-keys -t "$session:$branch_name" "$task_prompt_escaped" Enter 2>/dev/null || true
+) &
+disown
 
 agent_ok "Agent ready — model: ${model_id}  mode: ${mode}"

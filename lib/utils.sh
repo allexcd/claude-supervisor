@@ -113,17 +113,129 @@ check_deps() {
   ok "All dependencies installed successfully"
 }
 
+# ─── Billing mode ───────────────────────────────────────────────────────────
+# CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE is "pro" (Claude Pro/Max/Team — OAuth login, no API key needed)
+# or "api" (Anthropic Console — API key billing).
+
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=""
+
+# Static model list for Pro users (no API call needed)
+STATIC_MODELS=(
+  "claude-sonnet-4-5-20250929|Claude Sonnet 4.5"
+  "claude-opus-4-6|Claude Opus 4"
+  "claude-haiku-4-5-20251001|Claude Haiku 4.5"
+)
+
+ask_billing_mode() {
+  local repo="${1:-}"
+
+  # If ANTHROPIC_API_KEY is already set, assume API billing
+  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE="api"
+    ok "ANTHROPIC_API_KEY found — using API key billing"
+    return 0
+  fi
+
+  # Check project .env file for API key
+  if [[ -n "$repo" && -f "$repo/.env" ]]; then
+    local env_val
+    env_val="$(grep '^ANTHROPIC_API_KEY=' "$repo/.env" 2>/dev/null | tail -1 | cut -d'=' -f2- || true)"
+    if [[ -n "$env_val" ]]; then
+      ANTHROPIC_API_KEY="$env_val"
+      export ANTHROPIC_API_KEY
+      CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE="api"
+      ok "ANTHROPIC_API_KEY loaded from .env — using API key billing"
+      return 0
+    fi
+  fi
+
+  # Check project .env file for saved billing mode
+  if [[ -z "${RESET_BILLING:-}" && -n "$repo" && -f "$repo/.env" ]]; then
+    local saved_mode
+    saved_mode="$(grep '^CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=' "$repo/.env" 2>/dev/null | tail -1 | cut -d'=' -f2- || true)"
+    if [[ "$saved_mode" == "pro" || "$saved_mode" == "api" ]]; then
+      CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE="$saved_mode"
+      if [[ "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" == "pro" ]]; then
+        ok "Using Claude Pro subscription (saved preference)"
+      else
+        ok "Using API key billing (saved preference)"
+      fi
+      return 0
+    fi
+  fi
+
+  # Ask user
+  echo ""
+  printf "  ${BOLD}How do you use Claude Code?${RESET}\n"
+  printf "    1) Claude Pro / Max / Team subscription (OAuth login)\n"
+  printf "    2) Anthropic API key (Console billing)\n"
+  echo ""
+  printf "  Select [1]: "
+  local choice
+  read -r choice </dev/tty 2>/dev/null || choice="1"
+  [[ -z "$choice" ]] && choice="1"
+
+  if [[ "$choice" == "2" ]]; then
+    CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE="api"
+    ok "Using API key billing"
+  else
+    CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE="pro"
+    ok "Using Claude Pro subscription (no API key needed)"
+  fi
+
+  # Persist the choice to .env
+  _save_billing_mode "$repo"
+}
+
+# ─── _save_billing_mode ────────────────────────────────────────────────────
+# Persists CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE to the project's .env file.
+# Updates existing CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE= line or appends.
+
+_save_billing_mode() {
+  local repo="${1:-}"
+  [[ -z "$repo" ]] && return 0
+  [[ -z "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" ]] && return 0
+
+  local env_file="$repo/.env"
+
+  if [[ -f "$env_file" ]] && grep -q '^CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=' "$env_file" 2>/dev/null; then
+    # Update existing line
+    sed -i '' "s/^CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=.*/CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=${CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE}/" "$env_file"
+  elif [[ -f "$env_file" ]]; then
+    # Append to existing .env
+    [[ -s "$env_file" && "$(tail -c1 "$env_file")" != "" ]] && printf '\n' >> "$env_file"
+    printf 'CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=%s\n' "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" >> "$env_file"
+  else
+    # Create new .env
+    printf 'CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=%s\n' "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" > "$env_file"
+  fi
+
+  # Ensure .env is in .gitignore
+  local gitignore="$repo/.gitignore"
+  if [[ -f "$gitignore" ]]; then
+    if ! grep -qx '.env' "$gitignore" 2>/dev/null; then
+      printf '\n.env\n' >> "$gitignore"
+    fi
+  else
+    printf '.env\n' > "$gitignore"
+  fi
+}
+
 # ─── resolve_api_key ────────────────────────────────────────────────────────
-# Checks ANTHROPIC_API_KEY env var; prompts via read -s if absent.
-# Key is exported so it can be passed explicitly to tmux windows.
+# Only called for API billing users. Checks env, .env file, then prompts.
+# Usage: resolve_api_key [repo_path]
 
 resolve_api_key() {
+  local repo="${1:-}"
+
+  # Already loaded by ask_billing_mode
   if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    ok "ANTHROPIC_API_KEY found in environment"
+    ok "ANTHROPIC_API_KEY ready"
     export ANTHROPIC_API_KEY
     return 0
   fi
 
+  # Prompt interactively
   echo ""
   printf "${BOLD}Enter your Anthropic API key:${RESET} "
   read -rs ANTHROPIC_API_KEY
@@ -137,6 +249,48 @@ resolve_api_key() {
   ok "API key set"
 }
 
+# ─── save_api_key_to_env ────────────────────────────────────────────────────
+# Persists ANTHROPIC_API_KEY to the project's .env file.
+# Creates .env if it doesn't exist. Appends as the last entry if the file
+# already has other variables. Skips if the key is already present.
+# Also ensures .env is listed in .gitignore (secrets must not be committed).
+# Usage: save_api_key_to_env <repo_path>
+
+save_api_key_to_env() {
+  local repo="$1"
+  [[ -z "${ANTHROPIC_API_KEY:-}" ]] && return 0
+
+  local env_file="$repo/.env"
+
+  # Already present — don't duplicate
+  if [[ -f "$env_file" ]] && grep -q '^ANTHROPIC_API_KEY=' "$env_file" 2>/dev/null; then
+    return 0
+  fi
+
+  # Append or create
+  if [[ -f "$env_file" ]]; then
+    # Ensure a trailing newline before appending
+    [[ -s "$env_file" && "$(tail -c1 "$env_file")" != "" ]] && printf '\n' >> "$env_file"
+    printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" >> "$env_file"
+    ok "Saved ANTHROPIC_API_KEY to .env (appended)"
+  else
+    printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > "$env_file"
+    ok "Created .env with ANTHROPIC_API_KEY"
+  fi
+
+  # Ensure .env is in .gitignore
+  local gitignore="$repo/.gitignore"
+  if [[ -f "$gitignore" ]]; then
+    if ! grep -qx '.env' "$gitignore" 2>/dev/null; then
+      printf '\n.env\n' >> "$gitignore"
+      ok "Added .env to .gitignore"
+    fi
+  else
+    printf '.env\n' > "$gitignore"
+    ok "Created .gitignore with .env"
+  fi
+}
+
 # ─── fetch_models ───────────────────────────────────────────────────────────
 # Hits Anthropic API once; populates AVAILABLE_MODELS array.
 # Each entry is "model_id|display_name".
@@ -145,6 +299,15 @@ resolve_api_key() {
 AVAILABLE_MODELS=()
 
 fetch_models() {
+  # Pro users: use static model list (no API key available)
+  if [[ "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" == "pro" ]]; then
+    AVAILABLE_MODELS=("${STATIC_MODELS[@]}")
+    ok "Using standard model list (${#AVAILABLE_MODELS[@]} models)"
+    info "You can also type /model inside Claude to switch models anytime."
+    return 0
+  fi
+
+  # API users: fetch live from Anthropic API
   info "Fetching available models from Anthropic API..."
 
   local response
@@ -154,21 +317,19 @@ fetch_models() {
     "https://api.anthropic.com/v1/models?limit=100" 2>/dev/null) || true
 
   if [[ -z "$response" ]]; then
-    warn "Could not fetch models from API."
-    _prompt_manual_model
+    warn "Could not fetch models from API — using static list."
+    AVAILABLE_MODELS=("${STATIC_MODELS[@]}")
+    ok "Using standard model list (${#AVAILABLE_MODELS[@]} models)"
     return 0
   fi
 
   AVAILABLE_MODELS=()
 
   if command -v jq &>/dev/null; then
-    # jq path — clean extraction
     while IFS= read -r line; do
       [[ -n "$line" ]] && AVAILABLE_MODELS+=("$line")
     done < <(echo "$response" | jq -r '.data[] | "\(.id)|\(.display_name // .id)"' 2>/dev/null)
   else
-    # grep/sed fallback — extract id and display_name pairs
-    # The API returns JSON objects with "id" and "display_name" fields
     while IFS= read -r id; do
       [[ -n "$id" ]] && AVAILABLE_MODELS+=("${id}|${id}")
     done < <(echo "$response" | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/"id"[[:space:]]*:[[:space:]]*"//;s/"$//')
@@ -240,6 +401,65 @@ pick_model() {
   echo "$model_id"
 }
 
+# ─── show_available_models ──────────────────────────────────────────────────
+# Displays available models for reference during first-run scaffolding.
+# For API key users: fetches live from API. For Pro users: shows static list.
+# Soft-fail — never dies.
+
+show_available_models() {
+  local repo="${1:-}"
+
+  echo ""
+  printf "  ${BOLD}Common model IDs for the 'model' field in tasks.conf:${RESET}\n"
+  echo ""
+
+  # Always show the static/common models
+  for entry in "${STATIC_MODELS[@]}"; do
+    local mid="${entry%%|*}"
+    local mname="${entry#*|}"
+    printf "    ${CYAN}%-45s${RESET} %s\n" "$mid" "$mname"
+  done
+
+  # If API key is available, also fetch live list
+  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    info "Fetching full model list from Anthropic API..."
+    local response
+    response=$(curl -sf \
+      -H "x-api-key: $ANTHROPIC_API_KEY" \
+      -H "anthropic-version: 2023-06-01" \
+      "https://api.anthropic.com/v1/models?limit=100" 2>/dev/null) || response=""
+
+    if [[ -n "$response" ]]; then
+      local model_lines=()
+      if command -v jq &>/dev/null; then
+        while IFS= read -r line; do
+          [[ -n "$line" ]] && model_lines+=("$line")
+        done < <(echo "$response" | jq -r '.data[] | "\(.id)|\(.display_name // .id)"' 2>/dev/null)
+      else
+        while IFS= read -r id; do
+          [[ -n "$id" ]] && model_lines+=("${id}|${id}")
+        done < <(echo "$response" | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/"id"[[:space:]]*:[[:space:]]*"//;s/"$//')
+      fi
+
+      if [[ ${#model_lines[@]} -gt 0 ]]; then
+        ok "Found ${#model_lines[@]} models from API"
+        echo ""
+        printf "  ${BOLD}Full list from API:${RESET}\n"
+        echo ""
+        for entry in "${model_lines[@]}"; do
+          local mid="${entry%%|*}"
+          local mname="${entry#*|}"
+          printf "    ${CYAN}%-45s${RESET} %s\n" "$mid" "$mname"
+        done
+      fi
+    fi
+  fi
+
+  echo ""
+  info "You can also omit the model field — the supervisor will prompt on the next run."
+  info "Or type /model inside Claude to switch models anytime."
+}
+
 # ─── slugify ────────────────────────────────────────────────────────────────
 # Converts free text to a valid git branch name.
 # Lowercase, spaces→hyphens, strip non-alphanumeric except hyphens,
@@ -279,12 +499,6 @@ setup_window() {
     "bg=${color},fg=colour232,bold" 2>/dev/null || true
   tmux set-window-option -t "${session}:${window_name}" window-status-current-style \
     "bg=${color},fg=colour232,bold" 2>/dev/null || true
-
-  # Set Ghostty tab title via OSC 0 if detected
-  if [[ "${TERM_PROGRAM:-}" == "ghostty" ]]; then
-    tmux send-keys -t "${session}:${window_name}" \
-      "printf '\\033]0;${window_name}\\007'" Enter 2>/dev/null || true
-  fi
 }
 
 # ─── print_banner ───────────────────────────────────────────────────────────

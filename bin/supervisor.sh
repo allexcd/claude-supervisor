@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # bin/supervisor.sh — Orchestrates parallel Claude Code agents
 #
-# Usage: supervisor.sh [repo_path]
+# Usage: supervisor.sh [--reset] [repo_path]
 #   repo_path defaults to $PWD
+#   --reset   re-prompt for billing mode (Pro vs API)
 #
 # First run:  auto-init scaffolds tasks.conf + .claude/ from templates → exits
 # Normal run: reads tasks.conf, spawns one agent per task line
@@ -17,7 +18,17 @@ source "$SCRIPT_DIR/../lib/utils.sh"
 
 # ─── Parse args ─────────────────────────────────────────────────────────────
 
-repo_path="${1:-$PWD}"
+RESET_BILLING=""
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --reset) RESET_BILLING=1 ;;
+    *)       args+=("$arg") ;;
+  esac
+done
+export RESET_BILLING
+
+repo_path="${args[0]:-$PWD}"
 
 # Resolve to absolute path
 if [[ -d "$repo_path" ]]; then
@@ -92,9 +103,16 @@ if [[ ! -f "$repo_path/tasks.conf" ]]; then
     warn ".claude/ directory already exists — skipping scaffold"
   fi
 
+  # Show available models so the user knows what to put in tasks.conf
+  step "Available models"
+  show_available_models "$repo_path"
+
   echo ""
   printf "${BOLD}Next:${RESET} edit ${CYAN}tasks.conf${RESET} with your tasks, then run supervisor again.\n"
   printf "      ${CYAN}%s/tasks.conf${RESET}\n" "$repo_path"
+  echo ""
+  info "Leave the model field blank in tasks.conf to choose at run time."
+  info "Pro subscribers authenticate via Claude — no API key needed."
   echo ""
   exit 0
 fi
@@ -105,16 +123,21 @@ echo ""
 printf "${BOLD}Claude Supervisor${RESET}\n"
 printf "  Repo : ${CYAN}%s${RESET}\n" "$repo_path"
 
-step "1/5 — Checking dependencies"
+step "1/4 — Checking dependencies"
 check_deps
 
-step "2/5 — Resolving API key"
-resolve_api_key
+step "2/4 — Billing mode & authentication"
+ask_billing_mode "$repo_path"
 
-step "3/5 — Fetching available models from Anthropic API"
+if [[ "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" == "api" ]]; then
+  resolve_api_key "$repo_path"
+  save_api_key_to_env "$repo_path"
+fi
+
+step "3/4 — Loading available models"
 fetch_models
 
-# Step 3.5: Warn if the PermissionRequest hook model is no longer available
+# Warn if the PermissionRequest hook model is no longer available.
 # Models get deprecated — if settings.json still references an old model ID the
 # hook will silently fail, which means risky actions go ungated.
 _check_hook_model() {
@@ -156,17 +179,24 @@ _check_hook_model() {
   fi
 }
 
-step "4/5 — Verifying PermissionRequest hook model"
-_check_hook_model
+if [[ "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" == "api" ]]; then
+  _check_hook_model
+fi
 
 # Step 5: Parse tasks.conf (INI-style blocks) and spawn agents
 tasks_file="$repo_path/tasks.conf"
 total_tasks=$(grep -c '^\[task\]' "$tasks_file" 2>/dev/null || echo "0")
 
-step "5/5 — Spawning agents  (${total_tasks} task block(s) found in tasks.conf)"
+step "4/4 — Spawning agents  (${total_tasks} task block(s) found in tasks.conf)"
 
 agent_index=0
 agent_count=0
+
+# Arrays to store resolved agent details for the summary
+declare -a _spawned_branches=()
+declare -a _spawned_models=()
+declare -a _spawned_modes=()
+declare -a _spawned_prompts=()
 
 # ─── INI block parser ────────────────────────────────────────────────────────
 # Format:
@@ -223,6 +253,12 @@ _spawn_current_task() {
   printf "  ${BOLD}Model${RESET}  : %s\n" "$model"
   echo ""
 
+  # Store resolved details for summary
+  _spawned_branches+=("$branch")
+  _spawned_models+=("$model")
+  _spawned_modes+=("$mode")
+  _spawned_prompts+=("$prompt")
+
   # Spawn the agent
   "$SCRIPT_DIR/spawn-agent.sh" "$repo_path" "$branch" "$model" "$mode" "$agent_index" "$prompt"
 
@@ -274,14 +310,46 @@ fi
 # ─── Summary ────────────────────────────────────────────────────────────────
 
 session="$(basename "$repo_path")-agents"
+repo_parent="$(dirname "$repo_path")"
+repo_name="$(basename "$repo_path")"
 
 echo ""
-printf "${BOLD}─────────────────────────────────────────${RESET}\n"
-printf "  Spawned ${GREEN}${agent_count}${RESET} agents. Worktrees:\n"
-printf "${BOLD}─────────────────────────────────────────${RESET}\n"
-git -C "$repo_path" worktree list
-printf "${BOLD}─────────────────────────────────────────${RESET}\n"
+printf "${BOLD}═══════════════════════════════════════════════════════════════${RESET}\n"
+printf "  ${GREEN}✓${RESET} Spawned ${GREEN}${agent_count}${RESET} agent(s) in tmux session: ${CYAN}${session}${RESET}\n"
+printf "${BOLD}═══════════════════════════════════════════════════════════════${RESET}\n"
 echo ""
-printf "  tmux session: ${CYAN}${session}${RESET}\n"
-printf "  Attach with:  ${BOLD}tmux attach -t ${session}${RESET}\n"
+
+# Show per-agent instructions
+printf "  ${BOLD}Option A — Attach to tmux (all agents in one place):${RESET}\n"
+echo ""
+printf "    ${CYAN}tmux attach -t ${session}${RESET}\n"
+echo ""
+printf "    Navigate: ${BOLD}Ctrl+b n${RESET} (next)  ${BOLD}Ctrl+b p${RESET} (prev)  ${BOLD}Ctrl+b w${RESET} (list)\n"
+printf "    Detach:   ${BOLD}Ctrl+b d${RESET} (agents keep running in background)\n"
+echo ""
+
+printf "  ${BOLD}Option B — Open each agent in its own terminal tab:${RESET}\n"
+echo ""
+printf "    Open a new tab for each worktree below and run the command:\n"
+echo ""
+
+for i in "${!_spawned_branches[@]}"; do
+  local_branch="${_spawned_branches[$i]}"
+  local_model="${_spawned_models[$i]}"
+  local_mode="${_spawned_modes[$i]}"
+  local_prompt="${_spawned_prompts[$i]}"
+  local_wt="${repo_parent}/${repo_name}-${local_branch}"
+  local_prompt_short=$(echo "$local_prompt" | head -c 60 | tr '\n' ' ')
+  
+  local_cmd="cd ${local_wt} && claude"
+  [[ -n "$local_model" ]] && local_cmd+=" --model ${local_model}"
+  [[ "$local_mode" == "plan" ]] && local_cmd+=" --permission-mode plan"
+  
+  printf "    ${BOLD}Tab %d${RESET} — %s\n" "$((i + 1))" "$local_prompt_short"
+  printf "    ${CYAN}%s${RESET}\n\n" "$local_cmd"
+done
+
+printf "    Then paste the task prompt into Claude when it loads.\n"
+echo ""
+printf "${BOLD}═══════════════════════════════════════════════════════════════${RESET}\n"
 echo ""

@@ -152,6 +152,8 @@ assert_file_exists ".claude/commands/explain.md created" "$test_repo/.claude/com
 assert_file_exists ".claude/commands/diagram.md created" "$test_repo/.claude/commands/diagram.md"
 assert_file_exists ".claude/commands/learn.md created" "$test_repo/.claude/commands/learn.md"
 assert_contains "init message mentions tasks.conf" "tasks.conf" "$output"
+assert_contains "model discovery runs during scaffold" "Available models" "$output"
+assert_contains "skips models without tty/key" "omit the model field" "$output"
 
 # Verify tasks.conf is added to .gitignore
 assert_file_exists ".gitignore created" "$test_repo/.gitignore"
@@ -227,6 +229,249 @@ else
 fi
 rm -rf "$test_repo_gi"
 
+# ─── Test: save_api_key_to_env ───────────────────────────────────────────────
+
+echo ""
+echo "save_api_key_to_env"
+echo "───────────────────"
+
+env_test_repo="/tmp/claude-supervisor-test-env-$$"
+mkdir -p "$env_test_repo"
+git -C "$env_test_repo" init -b main &>/dev/null
+touch "$env_test_repo/README.md"
+git -C "$env_test_repo" add . && git -C "$env_test_repo" commit -m "init" &>/dev/null
+
+# Test: creates .env from scratch
+ANTHROPIC_API_KEY="sk-test-key-123"
+export ANTHROPIC_API_KEY
+save_api_key_to_env "$env_test_repo" &>/dev/null
+
+assert_file_exists ".env created" "$env_test_repo/.env"
+if grep -q '^ANTHROPIC_API_KEY=sk-test-key-123$' "$env_test_repo/.env" 2>/dev/null; then
+  pass ".env contains correct key"
+else
+  fail ".env missing ANTHROPIC_API_KEY entry"
+fi
+
+# Test: .env added to .gitignore
+if [[ -f "$env_test_repo/.gitignore" ]] && grep -qx '.env' "$env_test_repo/.gitignore" 2>/dev/null; then
+  pass ".env added to .gitignore"
+else
+  fail ".gitignore missing .env entry"
+fi
+
+# Test: idempotent — doesn't duplicate key
+save_api_key_to_env "$env_test_repo" &>/dev/null
+env_key_count=$(grep -c '^ANTHROPIC_API_KEY=' "$env_test_repo/.env")
+if (( env_key_count == 1 )); then
+  pass ".env key not duplicated on re-run"
+else
+  fail ".env has ${env_key_count} ANTHROPIC_API_KEY entries (expected 1)"
+fi
+
+# Test: appends to existing .env without destroying other keys
+rm -rf "$env_test_repo/.env" "$env_test_repo/.gitignore"
+printf 'DATABASE_URL=postgres://localhost/mydb\nREDIS_URL=redis://localhost\n' > "$env_test_repo/.env"
+save_api_key_to_env "$env_test_repo" &>/dev/null
+
+if grep -q '^DATABASE_URL=' "$env_test_repo/.env" && grep -q '^REDIS_URL=' "$env_test_repo/.env"; then
+  pass ".env preserves existing keys"
+else
+  fail ".env existing keys were destroyed"
+fi
+
+if grep -q '^ANTHROPIC_API_KEY=sk-test-key-123$' "$env_test_repo/.env"; then
+  pass ".env appended ANTHROPIC_API_KEY after existing keys"
+else
+  fail ".env missing appended ANTHROPIC_API_KEY"
+fi
+
+rm -rf "$env_test_repo"
+unset ANTHROPIC_API_KEY
+
+# ─── Test: billing mode and static models ────────────────────────────────────
+
+echo ""
+echo "billing mode & static models"
+echo "────────────────────────────"
+
+# Test: STATIC_MODELS array is populated
+if [[ ${#STATIC_MODELS[@]} -gt 0 ]]; then
+  pass "STATIC_MODELS array is populated (${#STATIC_MODELS[@]} entries)"
+else
+  fail "STATIC_MODELS array is empty"
+fi
+
+# Test: STATIC_MODELS entries have correct format (id|name)
+static_format_ok=true
+for entry in "${STATIC_MODELS[@]}"; do
+  if [[ "$entry" != *"|"* ]]; then
+    static_format_ok=false
+    break
+  fi
+done
+if $static_format_ok; then
+  pass "STATIC_MODELS entries have id|name format"
+else
+  fail "STATIC_MODELS entries missing pipe separator"
+fi
+
+# Test: ask_billing_mode auto-detects API when key is set
+ANTHROPIC_API_KEY="sk-test-auto"
+export ANTHROPIC_API_KEY
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=""
+ask_billing_mode "/tmp/nonexistent" &>/dev/null
+if [[ "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" == "api" ]]; then
+  pass "ask_billing_mode auto-detects api when key is in env"
+else
+  fail "ask_billing_mode did not auto-detect api (got: '$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE')"
+fi
+
+# Test: ask_billing_mode auto-detects API when key is in .env file
+unset ANTHROPIC_API_KEY
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=""
+billing_test_dir="/tmp/claude-billing-test-$$"
+mkdir -p "$billing_test_dir"
+printf 'ANTHROPIC_API_KEY=sk-test-from-env\n' > "$billing_test_dir/.env"
+ask_billing_mode "$billing_test_dir" &>/dev/null
+if [[ "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" == "api" ]]; then
+  pass "ask_billing_mode auto-detects api from .env file"
+else
+  fail "ask_billing_mode did not detect api from .env (got: '$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE')"
+fi
+if [[ "${ANTHROPIC_API_KEY:-}" == "sk-test-from-env" ]]; then
+  pass "ask_billing_mode loads API key from .env"
+else
+  fail "ask_billing_mode did not load key from .env (got: '${ANTHROPIC_API_KEY:-}')"
+fi
+rm -rf "$billing_test_dir"
+unset ANTHROPIC_API_KEY
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=""
+
+# Test: fetch_models with pro billing returns static models
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE="pro"
+AVAILABLE_MODELS=()
+fetch_models &>/dev/null
+if [[ ${#AVAILABLE_MODELS[@]} -gt 0 ]]; then
+  pass "fetch_models (pro) populates AVAILABLE_MODELS"
+else
+  fail "fetch_models (pro) returned empty AVAILABLE_MODELS"
+fi
+
+# Test: fetch_models pro uses same count as STATIC_MODELS
+if [[ ${#AVAILABLE_MODELS[@]} -eq ${#STATIC_MODELS[@]} ]]; then
+  pass "fetch_models (pro) returns same count as STATIC_MODELS"
+else
+  fail "fetch_models (pro) returned ${#AVAILABLE_MODELS[@]} models, expected ${#STATIC_MODELS[@]}"
+fi
+
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=""
+AVAILABLE_MODELS=()
+
+# ─── Test: billing mode persistence ──────────────────────────────────────────
+
+echo ""
+echo "billing mode persistence"
+echo "────────────────────────"
+
+# Test: _save_billing_mode writes to .env
+persist_dir="/tmp/claude-persist-test-$$"
+mkdir -p "$persist_dir"
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE="pro"
+_save_billing_mode "$persist_dir"
+if [[ -f "$persist_dir/.env" ]] && grep -q '^CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=pro' "$persist_dir/.env"; then
+  pass "_save_billing_mode writes CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=pro to .env"
+else
+  fail "_save_billing_mode did not write to .env"
+fi
+
+# Test: _save_billing_mode creates .gitignore with .env
+if [[ -f "$persist_dir/.gitignore" ]] && grep -q '.env' "$persist_dir/.gitignore"; then
+  pass "_save_billing_mode adds .env to .gitignore"
+else
+  fail "_save_billing_mode did not add .env to .gitignore"
+fi
+
+# Test: _save_billing_mode updates existing value
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE="api"
+_save_billing_mode "$persist_dir"
+if grep -q '^CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=api' "$persist_dir/.env"; then
+  pass "_save_billing_mode updates existing CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE"
+else
+  fail "_save_billing_mode did not update CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE (got: $(cat "$persist_dir/.env"))"
+fi
+
+# Test: ask_billing_mode reads saved pro mode from .env
+unset ANTHROPIC_API_KEY 2>/dev/null || true
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=""
+RESET_BILLING=""
+printf 'CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=pro\n' > "$persist_dir/.env"
+ask_billing_mode "$persist_dir" &>/dev/null
+if [[ "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" == "pro" ]]; then
+  pass "ask_billing_mode reads saved pro preference from .env"
+else
+  fail "ask_billing_mode did not read saved preference (got: '$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE')"
+fi
+
+RESET_BILLING=""
+rm -rf "$persist_dir"
+unset ANTHROPIC_API_KEY 2>/dev/null || true
+CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=""
+
+# Test: spawn-agent succeeds without ANTHROPIC_API_KEY (Pro billing)
+# This is the exact scenario that caused "unbound variable" in production.
+spawn_nokey_repo="/tmp/claude-spawn-nokey-$$"
+mkdir -p "$spawn_nokey_repo"
+git -C "$spawn_nokey_repo" init -b main &>/dev/null
+touch "$spawn_nokey_repo/README.md"
+git -C "$spawn_nokey_repo" add . && git -C "$spawn_nokey_repo" commit -m "init" &>/dev/null
+mkdir -p "$spawn_nokey_repo/.claude"
+
+mkdir -p "/tmp/mock-bin-nokey-$$"
+cat > "/tmp/mock-bin-nokey-$$/tmux" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+chmod +x "/tmp/mock-bin-nokey-$$/tmux"
+
+unset ANTHROPIC_API_KEY
+nokey_output=""
+nokey_output=$(PATH="/tmp/mock-bin-nokey-$$:$PATH" bash "$PROJECT_ROOT/bin/spawn-agent.sh" \
+  "$spawn_nokey_repo" \
+  "nokey-branch" \
+  "claude-sonnet-4-5-20250929" \
+  "normal" \
+  "0" \
+  "Test without API key" 2>&1) && nokey_ec=$? || nokey_ec=$?
+
+if (( nokey_ec == 0 )); then
+  pass "spawn-agent exits 0 without API key (Pro billing)"
+else
+  fail "spawn-agent fails without API key (exit $nokey_ec): $nokey_output"
+fi
+
+nokey_startup="$spawn_nokey_repo/../$(basename "$spawn_nokey_repo")-nokey-branch/.claude-agent-start.sh"
+if [[ -f "$nokey_startup" ]]; then
+  pass "startup script created without API key"
+
+  # Validate the generated script is syntactically valid
+  if bash -n "$nokey_startup" 2>/dev/null; then
+    pass "no-key startup script has valid bash syntax"
+  else
+    fail "no-key startup script has syntax errors"
+  fi
+
+  # The if-block should have an empty string so export never fires at runtime
+  if grep -q 'ANTHROPIC_API_KEY="sk-' "$nokey_startup"; then
+    fail "startup script leaks a real API key"
+  else
+    pass "startup script without API key doesn't leak a real key"
+  fi
+else
+  fail "startup script not created for no-key test"
+fi
+rm -rf "$spawn_nokey_repo" "$spawn_nokey_repo-nokey-branch" "/tmp/mock-bin-nokey-$$"
+
 # ─── Test: supervisor rejects non-git directory ──────────────────────────────
 
 echo ""
@@ -263,6 +508,90 @@ assert_contains "shows usage on zero args" "Usage:" "$output5"
 output6="$(bash "$PROJECT_ROOT/bin/spawn-agent.sh" "/tmp" "branch" "model" "normal" "0" "task" 2>&1)" && exit_code=$? || exit_code=$?
 assert_exit_code "rejects non-git repo" "1" "$exit_code"
 assert_contains "error mentions git repo" "Not a git repository" "$output6"
+
+# ─── Test: spawn-agent startup script generation ─────────────────────────────
+
+echo ""
+echo "spawn-agent startup script"
+echo "──────────────────────────"
+
+# Create a minimal test repo with .claude/
+spawn_test_repo="/tmp/claude-supervisor-spawn-test-$$"
+mkdir -p "$spawn_test_repo/.claude/agents"
+mkdir -p "$spawn_test_repo/.claude/commands"
+touch "$spawn_test_repo/.claude/CLAUDE.md"
+echo '{}' > "$spawn_test_repo/.claude/settings.json"
+git -C "$spawn_test_repo" init -b main &>/dev/null
+touch "$spawn_test_repo/README.md"
+git -C "$spawn_test_repo" add . &>/dev/null
+git -C "$spawn_test_repo" commit -m "init" &>/dev/null
+
+# Mock tmux commands so spawn-agent doesn't actually create windows
+mkdir -p "/tmp/mock-bin-$$"
+cat > "/tmp/mock-bin-$$/tmux" <<'MOCK'
+#!/usr/bin/env bash
+# Mock tmux that does nothing but succeeds
+exit 0
+MOCK
+chmod +x "/tmp/mock-bin-$$/tmux"
+
+# Run spawn-agent with mocked tmux (WITH API key — the API billing path)
+export ANTHROPIC_API_KEY="sk-test-key"
+spawn_output=""
+spawn_output=$(PATH="/tmp/mock-bin-$$:$PATH" bash "$PROJECT_ROOT/bin/spawn-agent.sh" \
+  "$spawn_test_repo" \
+  "test-branch" \
+  "claude-sonnet-4-5-20250929" \
+  "normal" \
+  "0" \
+  "Test task prompt" 2>&1) && spawn_ec=$? || spawn_ec=$?
+
+if (( spawn_ec == 0 )); then
+  pass "spawn-agent exits 0 with API key"
+else
+  fail "spawn-agent failed (exit $spawn_ec): $spawn_output"
+fi
+
+# Check if startup script was created
+startup_script="$spawn_test_repo/../$(basename "$spawn_test_repo")-test-branch/.claude-agent-start.sh"
+if [[ -f "$startup_script" ]]; then
+  pass "startup script created"
+  
+  # Validate bash syntax
+  if bash -n "$startup_script" 2>/dev/null; then
+    pass "startup script has valid bash syntax"
+  else
+    fail "startup script has syntax errors"
+  fi
+  
+  # Check that it doesn't use -p flag (known to cause hangs)
+  if grep -q '\-p[[:space:]]\|--prompt' "$startup_script" 2>/dev/null; then
+    fail "startup script uses -p/--prompt flag (causes hangs)"
+  else
+    pass "startup script doesn't use problematic -p flag"
+  fi
+  
+  # Check it contains the claude command with model
+  if grep -q 'exec claude' "$startup_script" && grep -q 'model' "$startup_script"; then
+    pass "startup script contains claude exec with model"
+  else
+    fail "startup script missing claude exec command"
+  fi
+  
+  # Check it has the API key baked in
+  if grep -q 'ANTHROPIC_API_KEY="sk-test-key"' "$startup_script"; then
+    pass "startup script contains API key"
+  else
+    fail "startup script missing API key"
+  fi
+else
+  fail "startup script not created at $startup_script"
+fi
+
+# Cleanup
+rm -rf "$spawn_test_repo" "/tmp/mock-bin-$$"
+rm -rf "$spawn_test_repo-test-branch" 2>/dev/null
+unset ANTHROPIC_API_KEY
 
 # ─── Test: tasks.conf INI parsing ────────────────────────────────────────────
 

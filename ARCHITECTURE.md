@@ -107,77 +107,120 @@ The user never touches git branches, worktrees, or file copying.
 
 ---
 
-## Detailed Flow Diagram
+## Flow Diagrams
+
+### 1. Startup — dependencies, billing, models
+
+Everything that runs before any agent is spawned.
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'linear'}}}%%
 flowchart TD
-    A(["supervisor.sh [repo_path · tasks.conf]\nrepo_path defaults to PWD"]) --> B[source lib/utils.sh]
-    B --> C["check_deps()\nscan system for: git · tmux · npm · claude"]
+    A(["supervisor.sh [--reset] [repo_path]\nrepo_path defaults to PWD"]) --> B[source lib/utils.sh]
+    B --> C["check_deps()\nscan for: git · tmux · npm · claude"]
 
     C --> C1{any tools\nmissing?}
-    C1 -- no --> AK
-    C1 -- yes --> C2["list all missing tools\n+ install instructions for each"]
-    C2 --> C3{"auto-install\nmissing tools?"}
+    C1 -- no --> BM
+    C1 -- yes --> C2["list all missing tools\n+ install instructions"]
+    C2 --> C3{"auto-install?"}
     C3 -- no --> C4[print instructions and exit]
     C3 -- yes --> C5["install in order:\nnvm → npm → claude · tmux"]
-    C5 --> C6{install\nsucceeded?}
+    C5 --> C6{succeeded?}
     C6 -- no --> C4
-    C6 -- yes --> AK
+    C6 -- yes --> BM
 
-    AK["resolve_api_key()"]
-    AK --> AK1{ANTHROPIC_API_KEY\nenv var set?}
-    AK1 -- yes --> AK4
-    AK1 -- no --> AK2["prompt user\nread -s silent input"]
+    BM["ask_billing_mode(repo_path)"]
+    BM --> BM1{ANTHROPIC_API_KEY\nin env var?}
+    BM1 -- yes --> BM_API["mode = api"]
+    BM1 -- no --> BM1b{ANTHROPIC_API_KEY\nin project .env?}
+    BM1b -- yes --> BM_API
+    BM1b -- no --> BM2{"saved preference\nin .env?\n(skipped if --reset)"}
+    BM2 -- yes --> BM_SAVED["use saved mode"]
+    BM2 -- no --> BM3["prompt:\n1) Pro subscription\n2) API key"]
+    BM3 --> BM_SAVE["_save_billing_mode()\npersist choice to .env"]
+    BM_SAVE --> BM_CHECK
+
+    BM_API --> BM_CHECK
+    BM_SAVED --> BM_CHECK
+
+    BM_CHECK{"API key\nbilling?"}
+    BM_CHECK -- no --> FM
+    BM_CHECK -- yes --> AK
+
+    AK["resolve_api_key(repo_path)"]
+    AK --> AK1{already loaded?}
+    AK1 -- yes --> AK4["export ANTHROPIC_API_KEY"]
+    AK1 -- no --> AK2["prompt: read -s"]
     AK2 --> AK4
-    AK4["export ANTHROPIC_API_KEY\npassed explicitly to each tmux window"]
+    AK4 --> AK5["save_api_key_to_env()\npersist to .env · ensure .gitignore"]
+    AK5 --> FM
 
-    AK4 --> FM
+    FM["fetch_models()"]
+    FM --> FM1{"Pro billing?"}
+    FM1 -- yes --> FM2["STATIC_MODELS array\n(no API call)"]
+    FM1 -- no --> FM3["curl GET /v1/models"]
+    FM2 --> FM5[(AVAILABLE_MODELS)]
+    FM3 --> FM4["parse JSON\njq or grep/sed"]
+    FM4 --> FM5
+    FM3 -- failure --> FM2a["fall back to STATIC_MODELS"]
 
-    FM["fetch_models() — called ONCE"]
-    FM --> FM3["curl GET /v1/models"]
-    FM3 --> FM4["parse JSON\njq if available · grep/sed fallback"]
-    FM4 --> FM5[(AVAILABLE_MODELS array)]
-    FM3 -- failure --> FM2a[warn + offer manual model entry]
+    FM5 --> HK{"API billing?"}
+    HK -- no --> DONE(["→ task loop"])
+    HK -- yes --> HK1["_check_hook_model()\nverify PermissionRequest\nhook model is available"]
+    HK1 --> DONE
+```
 
-    FM5 --> LOOP
+### 2. Task loop — parse config and spawn agents
 
-    LOOP["for each task in tasks.conf\nbranch · model · mode · prompt"]
+The supervisor's orchestration: reads `tasks.conf`, resolves defaults, spawns one agent per block.
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'linear'}}}%%
+flowchart TD
+    START(["tasks.conf loaded"]) --> LOOP["for each [task] block"]
 
     LOOP --> BR{branch\nempty?}
-    BR -- yes --> BR1["slugify(prompt) → branch_name"]
+    BR -- yes --> BR1["slugify(prompt)\n→ branch_name"]
     BR -- no --> MD
     BR1 --> MD
 
     MD{model\nin config?}
     MD -- yes --> MO
-    MD -- no --> MD1["show task description\n+ pick_model() menu\n← AVAILABLE_MODELS"]
+    MD -- no --> MD1["pick_model()\nnumbered menu\nfrom AVAILABLE_MODELS"]
     MD1 --> MO
 
     MO{mode?}
-    MO -- normal --> SA
+    MO -- "normal (default)" --> SA
     MO -- plan --> SA
 
-    SA["spawn-agent.sh\nrepo · branch · model · mode · prompt"]
-    SA --> SA1[validate git repo]
-    SA1 --> SA2["git worktree add\nskip if exists"]
-    SA2 --> SA3["copy .claude/ dir from main repo\n(CLAUDE.md · agents/ · settings.json · hooks/)"]
-    SA3 --> SA4{inside\ntmux?}
-    SA4 -- yes --> SA5[new-window named branch_name]
-    SA4 -- no --> SA6["new-session named\nrepo_name-agents"]
-    SA5 --> SA7
-    SA6 --> SA7
+    SA["spawn-agent.sh\nrepo · branch · model\nmode · index · prompt"]
 
-    SA7["setup_window()\nassign color from palette by agent index\nset tmux window color + title\nif Ghostty: set tab title via OSC escape"]
+    SA --> NEXT{more tasks?}
+    NEXT -- yes --> LOOP
+    NEXT -- no --> END["summary box:\nOption A — tmux attach\nOption B — per-agent\ncd && claude commands"]
+```
 
-    SA7 --> SA8["print banner\ntask · branch · model · mode\n+ hint: /model to switch mid-session\n+ hint: update CLAUDE.md on corrections\n+ statusline shows context + git branch"]
+### 3. spawn-agent — worktree, tmux, launch
 
-    SA8 --> SA9{mode?}
-    SA9 -- normal --> SA10[/"claude --model model_id"/]
-    SA9 -- plan --> SA11[/"claude --model model_id --permission-mode plan"/]
+What happens inside each `spawn-agent.sh` call.
 
-    LOOP -- next task --> BR
-    LOOP -- done --> END[git worktree list summary]
+```mermaid
+%%{init: {'flowchart': {'curve': 'linear'}}}%%
+flowchart TD
+    IN(["spawn-agent.sh\nrepo · branch · model\nmode · index · prompt"]) --> V[validate git repo]
+    V --> WT["git worktree add -b branch\n(reuse if exists)"]
+    WT --> CP["copy .claude/ into worktree\nCLAUDE.md · agents/\ncommands/ · settings.json"]
+    CP --> SC["write startup script\n.claude-agent-start.sh\n• export API key (if set)\n• print banner\n• exec claude --model …"]
+
+    SC --> TM{tmux session\nexists?}
+    TM -- yes --> TM1["tmux new-window\nnamed branch_name\nruns startup script"]
+    TM -- no --> TM2["tmux new-session\nnamed repo-agents\nruns startup script"]
+    TM1 --> SW
+    TM2 --> SW
+
+    SW["setup_window()\nassign color from palette\nplan mode → yellow"]
+    SW --> AP["background: sleep 5\ntmux send-keys\nauto-paste task prompt"]
+    AP --> DONE(["agent running"])
 ```
 
 ---
@@ -187,8 +230,12 @@ flowchart TD
 | Function | Description |
 |---|---|
 | `check_deps` | Scans for all required tools; lists all missing ones with instructions; offers one-shot auto-install in correct dependency order |
-| `resolve_api_key` | Checks `ANTHROPIC_API_KEY` env var; prompts via `read -s` if absent; passes explicitly to each tmux window — no reliance on inheritance |
-| `fetch_models` | Hits Anthropic API once; populates `AVAILABLE_MODELS` array; `jq` if available, `grep`/`sed` fallback |
+| `ask_billing_mode` | Determines billing mode (Pro vs API key); checks for saved preference in `.env`; prompts if first run or `--reset` flag used; saves choice to `.env` |
+| `_save_billing_mode` | Persists `CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE` to project's `.env` file; updates existing line or appends; ensures `.env` is gitignored |
+| `resolve_api_key` | **API users only**: Checks env var → project `.env` → prompts via `read -s` if neither; passes explicitly to each tmux window — no reliance on inheritance |
+| `save_api_key_to_env` | Persists `ANTHROPIC_API_KEY` to the project's `.env` file; creates file if needed; appends without destroying existing keys; ensures `.env` is gitignored |
+| `show_available_models` | First-run model discovery: resolves API key (env → `.env` → prompt), fetches models, displays formatted list; soft-fail everywhere |
+| `fetch_models` | **Pro users**: use `STATIC_MODELS` array. **API users**: hits Anthropic API once; populates `AVAILABLE_MODELS` array; `jq` if available, `grep`/`sed` fallback |
 | `pick_model` | Shows task description + numbered model menu from `AVAILABLE_MODELS`; returns model ID — called per agent so user decides deliberately |
 | `slugify "<text>"` | Converts free text to a valid git branch name |
 | `setup_window <index> <mode>` | Assigns a color from palette by agent index; plan-mode gets a distinct color; sets tmux window color + title; sets Ghostty tab title via OSC escape if detected |
@@ -515,7 +562,9 @@ The Claude Code `/statusline` feature (shows context usage + git branch at the b
 
 - `check_deps` scans everything upfront, reports all missing tools at once, installs in correct dependency order (nvm → npm → claude)
 - User has **one decision point** for installs — auto or manual — not one per tool
-- `resolve_api_key` uses `read -s` for silent input; key is passed **explicitly** to each tmux window, not relying on environment inheritance
+- `ask_billing_mode` determines Pro vs API billing; saves preference to project's `.env` file to avoid re-prompting; `--reset` flag skips saved preference
+- `resolve_api_key` **API users only**: checks env var → project `.env` → `read -s` prompt; key is passed explicitly to each tmux window, not relying on environment inheritance
+- `save_api_key_to_env` persists the key to the project's `.env` file on every run (idempotent); ensures `.env` is gitignored so secrets are never committed
 - `repo_path` defaults to `$PWD` — no argument needed if running from inside the project
 - `fetch_models` is called **once** per supervisor run — list is reused for all `pick_model` calls
 - `pick_model` is called **per agent** intentionally — user decides model per task to manage credit consumption

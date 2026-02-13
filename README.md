@@ -6,7 +6,7 @@ Spin up parallel [Claude Code](https://docs.anthropic.com/en/docs/claude-code) a
 bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/your-project
 ```
 
-On first run it scaffolds a config file. On every run after that it reads the config and spawns one agent per `[task]` block: branch created, worktree created, tmux window opened, Claude launched. You never touch git branches or worktrees manually.
+On first run it scaffolds a config file. On every run after that it reads the config and spawns one agent per `[task]` block: branch created, worktree created, Claude launched in a tmux window. At the end it prints ready-to-copy commands so you can also open each agent in its own terminal tab.
 
 ---
 
@@ -29,13 +29,22 @@ brew update && brew upgrade git  # update git
 brew upgrade             # update all outdated formulae at once
 ```
 
-You also need an [Anthropic API key](https://console.anthropic.com/). Either export it:
+**Billing:** The supervisor supports two billing modes:
+
+| Mode | Who | API key needed? |
+|---|---|---|
+| **Pro / Max / Team** | Claude subscription users | No — authenticate via Claude's OAuth login |
+| **API key** | Anthropic Console users | Yes — `ANTHROPIC_API_KEY` required |
+
+The supervisor remembers your billing mode choice and saves it to your project's `.env` file. On subsequent runs, it uses the saved preference without re-prompting. If it finds `ANTHROPIC_API_KEY` in the environment or in your project's `.env`, it auto-selects API mode.
+
+To change your billing mode later, use the `--reset` flag:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+bash bin/supervisor.sh --reset /path/to/your-project
 ```
 
-Or the supervisor will prompt you (silent input, key never echoed).
+API-key users can export the key beforehand (`export ANTHROPIC_API_KEY=sk-ant-...`) or enter it at the prompt — it's saved to `.env` so you only enter it once.
 
 ---
 
@@ -75,7 +84,9 @@ your-project/
       learn.md               # /learn — Socratic learning session
 ```
 
-`tasks.conf` is automatically added to `.gitignore`. 
+`tasks.conf` is automatically added to `.gitignore`.
+
+The supervisor then displays common model IDs so you know what to put in `tasks.conf`. If an API key is available (environment variable or `.env` file), it also fetches the full list from the Anthropic API.
 
 What to commit and what to ignore:
 
@@ -86,8 +97,11 @@ What to commit and what to ignore:
 | `.claude/agents/` | **Commit** | Subagents are project tools — reviewer, debugger, test-writer |
 | `.claude/commands/` | **Commit** | Slash commands belong to the project — `/techdebt`, `/explain`, etc. |
 | `tasks.conf` | **Ignore** | Personal and ephemeral — your current batch of work. Two people running different tasks would conflict. |
+| `.env` | **Ignore** | Contains your API key (API-key billing only) — automatically gitignored when created. |
 
 The supervisor then exits with instructions.
+
+> **Tip:** If you skip the model list during first run, that's fine — you can omit the `model` field in tasks.conf and the supervisor will show an interactive menu on the next run.
 
 ### 3. Edit tasks.conf
 
@@ -145,30 +159,88 @@ bash bin/supervisor.sh /path/to/your-project
 
 The supervisor will:
 1. Check dependencies
-2. Ask for your API key (if not in env)
-3. Fetch available models from the Anthropic API
-4. For each task block, prompt you to pick a model (if not specified in config)
-5. Create a git branch + worktree per task
-6. Open a color-coded tmux window per agent
-7. Launch Claude Code with the task, model, and mode
-8. Print a summary with tmux attach instructions
+2. Use saved billing mode preference, or prompt if first run (Pro subscription or API key)
+3. Resolve API key (API-key users only — prompts if not found, saves to `.env`)
+4. Fetch available models (live from API for API-key users, static list for Pro users)
+5. For each task block, prompt you to pick a model (if not specified in config)
+6. Create a git branch + worktree per task
+7. Open a tmux window per agent, launch Claude Code
+8. Auto-paste the task prompt into Claude after it loads
+9. Print instructions for accessing each agent
+
+### 5. Access your agents
+
+After spawning, the supervisor prints two options:
+
+**Option A — tmux (all agents in one place):**
+
+```bash
+tmux attach -t your-project-agents
+```
+
+| Key | Action |
+|---|---|
+| `Ctrl+b n` | Next agent |
+| `Ctrl+b p` | Previous agent |
+| `Ctrl+b w` | List all agents — pick one |
+| `Ctrl+b 0` / `1` / `2` | Jump to agent by number |
+| `Ctrl+b d` | Detach (agents keep running in background) |
+
+> **Note:** Press `Ctrl+b`, release **both** keys, then press the second key. It's two separate keystrokes, not a three-key combo.
+
+**Option B — separate terminal tabs (simpler navigation):**
+
+The supervisor prints a ready-to-copy `cd ... && claude ...` command for each agent. Open a new tab in your terminal (`Cmd+T`), paste the command, and you're in. Use normal tab switching (`Cmd+1`, `Cmd+2`, etc.).
+
+Example output:
 
 ```
-─────────────────────────────────────────
-  Spawned 5 agents. Worktrees:
-─────────────────────────────────────────
-  /path/to/your-project          abc1234 [main]
-  /path/to/your-project-feature-auth  def5678 [feature-auth]
-  /path/to/your-project-fix-login-bug ghi9012 [fix-login-bug]
-  ...
-─────────────────────────────────────────
+═══════════════════════════════════════════════════════════════
+  ✓ Spawned 2 agent(s) in tmux session: your-project-agents
+═══════════════════════════════════════════════════════════════
 
-  tmux session: your-project-agents
-  Attach with:  tmux attach -t your-project-agents
-─────────────────────────────────────────
+  Option A — Attach to tmux (all agents in one place):
+
+    tmux attach -t your-project-agents
+
+  Option B — Open each agent in its own terminal tab:
+
+    Tab 1 — implement the OAuth2 login flow
+    cd /path/to/your-project-feature-auth && claude --model claude-sonnet-4-5-20250929
+
+    Tab 2 — fix the login session timeout bug
+    cd /path/to/your-project-fix-login-bug && claude --model claude-haiku-4-5-20251001
+
+    Then paste the task prompt into Claude when it loads.
+
+═══════════════════════════════════════════════════════════════
+```
+
+> **IMPORTANT — First time using Claude Code CLI?** You'll see Claude's setup wizard asking "Select login method". **Press `1`** if you have a Claude Pro/Max/Team subscription, or **press `2`** if you're using an Anthropic API key. This setup is one-time per machine.
+
+**Detach and reattach tmux anytime:**
+
+```bash
+# Detach (go back to your shell, agents keep running)
+Ctrl+b d
+
+# Reattach later
+tmux attach -t your-project-agents
+
+# List all sessions
+tmux ls
 ```
 
 > **Tip:** The commands above work because you `cd`'d into the claude-supervisor directory. For daily use from anywhere, either use the full path — `bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/project` — or set up shell shortcuts (next section).
+
+**Usage:**
+
+```bash
+supervisor.sh [--reset] [repo_path]
+```
+
+- `--reset`: Re-prompt for billing mode (clears saved preference)
+- `repo_path`: Project directory (defaults to current directory)
 
 ---
 
@@ -269,13 +341,26 @@ bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/your-project
 
 You'll be prompted to pick a model for each task. Pick Haiku for straightforward tasks, Sonnet or Opus for complex ones. Two worktrees and two tmux windows open automatically.
 
-**Step 4:** Attach to the tmux session and watch both agents work:
+**Step 4:** Access your agents. The supervisor prints two options:
+
+**Option A — tmux:** Attach to the tmux session and navigate between agents:
 
 ```bash
 tmux attach -t your-project-agents
 ```
 
-Switch between windows with `Ctrl+b n` / `Ctrl+b p`. Each window shows a banner and the live Claude session.
+**Option B — separate tabs:** Copy the `cd ... && claude ...` command for each agent into a new terminal tab (`Cmd+T`).
+
+You'll see each agent in its own color-coded tmux window with a banner showing the task.
+
+> **First time using Claude Code CLI?** You'll see a setup wizard asking "Select login method:". **Press `1` and Enter** if you have a Claude Pro/Max/Team subscription, or **Press `2` and Enter** if you're using an Anthropic API key (Console billing). This is one-time setup per machine. After setup, Claude will show its prompt.
+
+When Claude loads:
+- **Copy the task** from the banner at the top and paste it to Claude to begin
+- Switch between agents with `Ctrl+b` then `n`/`p` (tmux) or `Cmd+1`/`Cmd+2` (tabs)
+- Type **`/model`** to switch models mid-session (e.g. start with Opus for planning, switch to Haiku for implementation)
+
+Each agent works independently on its worktree.
 
 **Step 5:** After agents finish, collect learnings, open PRs, and clean up:
 
@@ -296,7 +381,12 @@ gh pr create --head rename-tab-titles-using-ai --base main \
 # Once PRs are approved and merged, clean up worktrees locally
 git worktree remove ../your-project-add-ungroup-all-functionality
 git worktree remove ../your-project-rename-tab-titles-using-ai
+
+# Kill the tmux session (stops all agents)
+tmux kill-session -t your-project-agents
 ```
+
+> **Tip:** If you need to stop agents early or start over, see the "Stopping agents and cleaning up worktrees" section below.
 
 ---
 
@@ -389,7 +479,7 @@ If a worker goes sideways, spawn a new plan-mode agent to reassess before contin
 
 ### Inside each agent session
 
-Each agent tmux window shows a banner with:
+Each agent tmux window shows a banner with the task details:
 
 ```
 ╔══════════════════════════════════════════════════════╗
@@ -407,7 +497,26 @@ Each agent tmux window shows a banner with:
 ║  • Update CLAUDE.md after corrections                ║
 ║  • Explain the WHY behind every change               ║
 ╚══════════════════════════════════════════════════════╝
+
+▸ Starting Claude...
+
+💡 Task will be shown above - you can copy/paste it to Claude when ready
 ```
+
+**First time using Claude Code CLI on this machine?**
+
+Before the banner appears, you'll see Claude's setup wizard:
+
+```
+Select login method:
+ › 1. Claude account with subscription · Pro, Max, Team, or Enterprise
+   2. Anthropic Console account · API usage billing
+   3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI
+```
+
+**Press `1` and Enter** if you have a Claude Pro, Max, Team, or Enterprise subscription. **Press `2` and Enter** if you're using an Anthropic API key (Console billing). This is one-time setup per machine. After completing setup, the banner will appear and Claude will be ready.
+
+**Start the agent:** Copy the task text from the banner and paste it to Claude when ready. The agent will begin working on it immediately.
 
 Useful commands inside an agent:
 - **`/model`** — switch to a cheaper model once complex planning is done
@@ -430,7 +539,7 @@ git -C /path/to/your-project commit -m "docs: merge agent learnings"
 git worktree list
 
 # 4. Open a PR for a branch (requires gh CLI)
-gh pr create --head feature-auth --base main \
+gh pr create --head feature-auth --base main 
   --title "Feature: OAuth2 login" --body "Implemented by Claude agent"
 
 # 5. After the PR is merged, remove the worktree
@@ -439,13 +548,66 @@ git worktree remove ../your-project-feature-auth
 
 > **Important:** Run `collect-learnings.sh` _before_ `git worktree remove`. Once a worktree is gone, its CLAUDE.md updates are gone with it.
 
+### Stopping agents and cleaning up worktrees
+
+**To stop all agents and kill the tmux session:**
+
+```bash
+# Kill the entire tmux session (stops all agents immediately)
+tmux kill-session -t your-project-agents
+```
+
+**To list and remove worktrees:**
+
+```bash
+# 1. List all active worktrees
+git worktree list
+
+# 2. Remove a specific worktree
+git worktree remove ../your-project-feature-auth
+
+# 3. Force remove (if there are uncommitted changes)
+git worktree remove --force ../your-project-feature-auth
+
+# 4. Remove all agent worktrees for a project
+git worktree list | grep "your-project-" | awk '{print $1}' | xargs -I {} git worktree remove --force {}
+```
+
+**Common scenarios:**
+
+| Scenario | Commands |
+|---|---|
+| **Agents stuck/hung** | `tmux kill-session -t project-agents` |
+| **Start fresh** | Kill session → remove worktrees → edit `tasks.conf` → run supervisor again |
+| **Agent finished, want to keep work** | Don't remove worktree yet — open PR from that branch first |
+| **Agent failed, want to retry** | Remove worktree → remove branch → run supervisor again (it will recreate) |
+| **Force closed terminal** | Agents still running — use `tmux attach` to reconnect, or `tmux kill-session` to stop |
+| **Killed session, want to resume** | Just run the supervisor again with the same `tasks.conf` — it detects existing worktrees and reuses them, no work is lost |
+
+**To remove branches after removing worktrees:**
+
+```bash
+# List all branches
+git branch -a
+
+# Delete a local branch (after merging)
+git branch -d feature-auth
+
+# Force delete a local branch (without merging)
+git branch -D feature-auth
+```
+
 ---
 
 ## Model Selection
 
 There are two separate model choices:
 
-**1. Agent model** — you pick this per task. It does the actual work. The supervisor fetches available models live from the Anthropic API and presents a menu for any task with an empty model field. You can also hardcode a model ID in `tasks.conf`.
+**1. Agent model** — you pick this per task. It does the actual work.
+
+- **Pro users:** the supervisor shows a static list of common models. You can also type `/model` inside any agent session to switch models on the fly.
+- **API-key users:** models are fetched live from the Anthropic API.
+- For any task with an empty `model` field, the supervisor presents an interactive menu. You can also hardcode a model ID in `tasks.conf`.
 
 **2. PermissionRequest hook model** — hardcoded to `claude-opus-4-6` in `.claude/settings.json`. This only fires when an agent tries a risky action (e.g., deleting a file). Opus evaluates for a few seconds and returns allow/deny. It does not run continuously.
 
@@ -562,7 +724,6 @@ This creates the worktree, copies `.claude/`, opens a tmux window, and launches 
 ## Terminal Setup
 
 - **tmux** — each agent gets its own tmux window, color-coded by index from a fixed palette. Plan-mode windows are always yellow.
-- **Ghostty** — if detected, tab titles are set via OSC escape sequences.
 - **Statusline** — run `/statusline` once in any Claude session to enable the context usage + git branch bar globally.
 
 ---
@@ -594,6 +755,19 @@ claude-supervisor/
         diagram.md             # /diagram skill
         learn.md               # /learn skill
 ```
+
+---
+
+## How Agents Run
+
+The supervisor uses **tmux** to run agents in the background. Each agent gets its own tmux window with a descriptive name. This works in any terminal (iTerm, Terminal.app, Ghostty, VS Code, etc.).
+
+After spawning, you have two ways to access agents:
+
+| Method | Best for | How |
+|---|---|---|
+| **tmux attach** | Monitoring all agents at once | `tmux attach -t session` + navigate with `Ctrl+b` |
+| **Separate tabs** | Easier navigation, familiar workflow | Copy the `cd ... && claude ...` commands into new tabs |
 
 ---
 
