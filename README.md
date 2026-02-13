@@ -3,6 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/claude-supervisor.svg)](https://www.npmjs.com/package/claude-supervisor)
 [![CI](https://github.com/allexcd/claude-supervisor/actions/workflows/ci.yml/badge.svg)](https://github.com/allexcd/claude-supervisor/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/allexcd/claude-supervisor)](LICENSE)
+[![node](https://img.shields.io/node/v/claude-supervisor)](https://nodejs.org)
 
 Spin up parallel [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents in isolated git worktrees — each with its own task, model, and mode — from a single config file.
 
