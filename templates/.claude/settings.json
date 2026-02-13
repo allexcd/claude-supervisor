@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "model": "claude-opus-4-6",
+            "prompt": "A Claude agent running on a cheaper model is requesting permission to use a tool. Your job is to decide whether this action is safe and appropriate given the agent's assigned task. Deny if the action looks destructive, irreversible without clear justification, out of scope for the task, or potentially harmful. Approve if it is clearly safe and aligned with the stated task. Return only valid JSON: {\"ok\": true} to approve or {\"ok\": false, \"reason\": \"<why>\"} to deny. Context: $ARGUMENTS",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
