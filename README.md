@@ -1,5 +1,7 @@
 # Claude Supervisor
 
+[![npm version](https://img.shields.io/npm/v/claude-supervisor.svg)](https://www.npmjs.com/package/claude-supervisor)
+
 Spin up parallel [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents in isolated git worktrees — each with its own task, model, and mode — from a single config file.
 
 ```bash
