@@ -10,7 +10,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$_SCRIPT_PATH" ]]; do
+  _SCRIPT_DIR="$(cd -P "$(dirname "$_SCRIPT_PATH")" && pwd)"
+  _SCRIPT_PATH="$(readlink "$_SCRIPT_PATH")"
+  [[ "$_SCRIPT_PATH" != /* ]] && _SCRIPT_PATH="$_SCRIPT_DIR/$_SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_SCRIPT_PATH")" && pwd)"
 TEMPLATES_DIR="$SCRIPT_DIR/../templates"
 VERSION="$(cat "$SCRIPT_DIR/../VERSION" 2>/dev/null || echo "unknown")"
 

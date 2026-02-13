@@ -11,7 +11,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -L "$_SCRIPT_PATH" ]]; do
+  _SCRIPT_DIR="$(cd -P "$(dirname "$_SCRIPT_PATH")" && pwd)"
+  _SCRIPT_PATH="$(readlink "$_SCRIPT_PATH")"
+  [[ "$_SCRIPT_PATH" != /* ]] && _SCRIPT_PATH="$_SCRIPT_DIR/$_SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_SCRIPT_PATH")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/utils.sh"
 
