@@ -66,22 +66,29 @@ supervisor.sh ~/my-project
 
 ### Option B — Local devDependency (teams, CI, version-locked)
 
+**Step 1.** Add `claude-supervisor` to your devDependencies:
+
+```bash
+npm install --save-dev claude-supervisor
+```
+
+**Step 2.** Add these npm scripts to your `package.json`:
+
 ```json
-// your-project/package.json
 {
   "scripts": {
     "agents":         "supervisor.sh",
     "agents:reset":   "supervisor.sh --reset",
     "agents:collect": "collect-learnings.sh --yes"
-  },
-  "devDependencies": {
-    "claude-supervisor": "^0.1.0"
   }
 }
 ```
 
+> **Important:** Both steps are required. Installing the package makes the binaries available, but the npm scripts above must be added manually to your `package.json` — they are not created automatically.
+
+**Step 3.** Run:
+
 ```bash
-npm install          # pulls in claude-supervisor
 npm run agents       # first run → scaffolds tasks.conf + .claude/ → exits
 # edit tasks.conf
 npm run agents       # spawns agents
