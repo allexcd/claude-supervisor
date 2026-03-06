@@ -987,3 +987,4 @@ No manual `npm publish` needed.
 ## License
 
 See [LICENSE](LICENSE).
+
