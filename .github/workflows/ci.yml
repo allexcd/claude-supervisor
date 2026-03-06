@@ -40,8 +40,8 @@ jobs:
             didn't match the configured pattern. Please ensure that the subject
             starts with an uppercase character (or "bump" for Dependabot).
 
-  smoke-tests:
-    name: Smoke Tests
+  test:
+    name: test
     runs-on: ubuntu-latest
 
     steps:
