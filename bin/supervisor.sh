@@ -79,6 +79,7 @@ if [[ ! -f "$repo_path/tasks.conf" ]]; then
   if [[ ! -d "$repo_path/.claude" ]]; then
     mkdir -p "$repo_path/.claude/agents"
     mkdir -p "$repo_path/.claude/commands"
+    mkdir -p "$repo_path/.claude/skills"
 
     # Copy CLAUDE.md
     if [[ -f "$TEMPLATES_DIR/CLAUDE.md" ]]; then
@@ -106,6 +107,14 @@ if [[ ! -f "$repo_path/tasks.conf" ]]; then
       ok "Created .claude/commands/       (/techdebt, /explain, /diagram, /learn skills)"
     else
       ok "Created .claude/commands/       (add custom slash commands here)"
+    fi
+
+    # Copy skills directory contents
+    if [[ -d "$TEMPLATES_DIR/.claude/skills" ]]; then
+      cp -r "$TEMPLATES_DIR/.claude/skills/"* "$repo_path/.claude/skills/" 2>/dev/null || true
+      ok "Created .claude/skills/         (/generate-skill + example template)"
+    else
+      ok "Created .claude/skills/         (add custom skills here)"
     fi
   else
     warn ".claude/ directory already exists — skipping scaffold"
