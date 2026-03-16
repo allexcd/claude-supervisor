@@ -889,12 +889,13 @@ The "prove this works" pattern is especially useful. A reviewer agent that has t
 
 ### Turning repeat work into skills
 
-There are two places to put reusable work:
+There are three places to put reusable work:
 
 - **`.claude/commands/`** — slash commands you invoke yourself (`/techdebt`, `/explain`, `/diagram`, `/learn`). Use for workflows you trigger intentionally.
 - **`.claude/agents/`** — subagents Claude delegates to automatically based on the task. Use for specialized roles (reviewer, debugger, test writer).
+- **`.claude/skills/`** — skills following the [Agent Skills](https://agentskills.io) open standard. Claude can load them automatically when the task matches their description, or you invoke them manually with `/skill-name`. Use for portable, shareable capabilities.
 
-If you do something more than once a week, it belongs in one of these. The rule of thumb: if *you* decide when to run it, it's a command. If *Claude* should decide when to delegate it, it's a subagent.
+If you do something more than once a week, it belongs in one of these. The rule of thumb: if *you* decide when to run it, it's a command. If *Claude* should decide when to delegate it, it's a subagent. If you want it portable, shareable, or auto-loaded by context, make it a skill.
 
 More ideas for commands:
 
