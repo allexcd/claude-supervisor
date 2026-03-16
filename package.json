@@ -1,6 +1,6 @@
 {
   "name": "claude-supervisor",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Spin up parallel Claude Code agents in isolated git worktrees",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
