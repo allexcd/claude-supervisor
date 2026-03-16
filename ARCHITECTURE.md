@@ -26,6 +26,8 @@ templates/.claude/commands/techdebt.md   # /techdebt skill (user-invoked)
 templates/.claude/commands/explain.md    # /explain skill (user-invoked)
 templates/.claude/commands/diagram.md    # /diagram skill (user-invoked)
 templates/.claude/commands/learn.md      # /learn skill (user-invoked)
+templates/.claude/skills/_example-skill/SKILL.md  # Annotated skill template (Agent Skills standard)
+templates/.claude/skills/generate-skill/SKILL.md  # /generate-skill — creates new skills interactively
 ```
 
 ### What the user actually runs
@@ -93,17 +95,23 @@ The user never touches git branches, worktrees, or file copying.
           │         ├── /diagram   — draw ASCII architecture diagrams
           │         └── /learn     — Socratic learning session
           │
+          ├── AUTO-LOADED OR USER-INVOKED ── .claude/skills/
+          │         (Agent Skills standard — Claude loads by description match, or /skill-name)
+          │         ├── /generate-skill  — interactively scaffold a new skill
+          │         └── _example-skill   — annotated template for custom skills
+          │
           └── RISKY ACTION ── .claude/settings.json
                     PermissionRequest hook fires
                     └── claude-opus-4-6 evaluates: allow / deny
 ```
 
-**Two triggering mechanisms:**
+**Three triggering mechanisms:**
 
 | Mechanism | Who triggers it | How |
 |---|---|---|
 | **Sub-agents** (`.claude/agents/`) | The agent itself, automatically | Agent reads the `description:` of each agent and delegates when the task matches. You can also force it: *"Use the debugger agent."* |
-| **Commands / Skills** (`.claude/commands/`) | You, explicitly | Type `/techdebt`, `/explain`, `/diagram`, or `/learn` inside the tmux window at any point during the session. |
+| **Commands** (`.claude/commands/`) | You, explicitly | Type `/techdebt`, `/explain`, `/diagram`, or `/learn` inside the tmux window at any point during the session. |
+| **Skills** (`.claude/skills/`) | Claude automatically, or you explicitly | Claude loads a skill when the task matches its `description:` field. You can also invoke manually with `/skill-name`. Follows the [Agent Skills](https://agentskills.io) open standard. |
 
 ---
 
@@ -209,7 +217,7 @@ What happens inside each `spawn-agent.sh` call.
 flowchart TD
     IN(["spawn-agent.sh\nrepo · branch · model\nmode · index · prompt"]) --> V[validate git repo]
     V --> WT["git worktree add -b branch\n(reuse if exists)"]
-    WT --> CP["copy .claude/ into worktree\nCLAUDE.md · agents/\ncommands/ · settings.json"]
+    WT --> CP["copy .claude/ into worktree\nCLAUDE.md · agents/\ncommands/ · skills/ · settings.json"]
     CP --> SC["write startup script\n.claude-agent-start.sh\n• export API key (if set)\n• print banner\n• exec claude --model …"]
 
     SC --> TM{tmux session\nexists?}
@@ -363,7 +371,7 @@ Every worktree gets a copy of this directory, so all spawned agents share the sa
 
 ### `templates/.claude/commands/` → `<project>/.claude/commands/`
 
-Each `.md` file defines a **skill** (slash command) — invoked by the user with `/command-name` inside any Claude session. Unlike subagents, skills run in the main agent's context and are always user-triggered.
+Each `.md` file defines a slash command — invoked by the user with `/command-name` inside any Claude session. Commands run in the main agent's context and are always user-triggered.
 
 **Shipped commands:**
 
@@ -373,6 +381,21 @@ Each `.md` file defines a **skill** (slash command) — invoked by the user with
 | `explain.md` | `/explain` | Explains code: what/why/how/fits-in/gotchas |
 | `diagram.md` | `/diagram` | Draws ASCII diagrams of architecture, data flow, or call chains |
 | `learn.md` | `/learn` | Socratic session — you explain, Claude asks follow-ups, saves a summary |
+
+---
+
+### `templates/.claude/skills/` → `<project>/.claude/skills/`
+
+Each subdirectory contains a `SKILL.md` file following the [Agent Skills](https://agentskills.io) open standard. Claude reads the `description:` frontmatter field and auto-loads matching skills based on context. Skills can also be invoked manually with `/skill-name`.
+
+Every worktree gets a copy of this directory so all spawned agents have access to the same skill set.
+
+**Shipped skills:**
+
+| Directory | Invoked with | What it does |
+|---|---|---|
+| `generate-skill/` | `/generate-skill` | Interactively scaffolds a new skill with proper YAML frontmatter and body |
+| `_example-skill/` | — | Annotated template with all frontmatter fields and a quick-reference table |
 
 ---
 
@@ -569,7 +592,7 @@ The Claude Code `/statusline` feature (shows context usage + git branch at the b
 - `fetch_models` is called **once** per supervisor run — list is reused for all `pick_model` calls
 - `pick_model` is called **per agent** intentionally — user decides model per task to manage credit consumption
 - `/model` mid-session switching is surfaced in the banner for in-flight credit management
-- The full `.claude/` directory is copied into every worktree — agents inherit CLAUDE.md memory, custom subagent definitions, and hook configs
+- The full `.claude/` directory is copied into every worktree — agents inherit CLAUDE.md memory, custom subagent definitions, skills, and hook configs
 - `PermissionRequest` hook routes permission decisions to Opus — cheap models work, Opus decides on risky actions
 - Plan mode agents write and review plans before any code is written — workers execute after approval
 - `setup_window` detects Ghostty vs tmux at runtime — no hard dependency on either
