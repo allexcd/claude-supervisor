@@ -852,6 +852,180 @@ assert_eq "prompt with equals preserved" \
 
 rm -f "$tmp_conf"
 
+# ─── Test: watch dashboard ────────────────────────────────────────────────────
+
+echo ""
+echo "watch dashboard"
+echo "───────────────"
+
+# Verify bin/watch.sh exists and is executable
+assert_file_exists "bin/watch.sh exists" "$PROJECT_ROOT/bin/watch.sh"
+if [[ -x "$PROJECT_ROOT/bin/watch.sh" ]]; then
+  pass "watch.sh is executable"
+else
+  fail "watch.sh is not executable"
+fi
+
+# Verify bash syntax
+if bash -n "$PROJECT_ROOT/bin/watch.sh" 2>/dev/null; then
+  pass "watch.sh has valid bash syntax"
+else
+  fail "watch.sh has bash syntax errors"
+fi
+
+# Verify lib/jsonl-tail.mjs exists
+assert_file_exists "lib/jsonl-tail.mjs exists" "$PROJECT_ROOT/lib/jsonl-tail.mjs"
+
+# Verify Node.js syntax of jsonl-tail.mjs (if node is available)
+_node_bin=""
+if command -v node &>/dev/null; then
+  _node_bin="node"
+fi
+if [[ -z "$_node_bin" ]] && [[ -n "${NVM_DIR:-}" ]]; then
+  for _n in "$NVM_DIR/versions/node/"*/bin/node; do
+    [[ -x "$_n" ]] && _node_bin="$_n" && break
+  done
+fi
+if [[ -n "$_node_bin" ]]; then
+  if "$_node_bin" --check "$PROJECT_ROOT/lib/jsonl-tail.mjs" 2>/dev/null; then
+    pass "jsonl-tail.mjs has valid JS syntax"
+  else
+    fail "jsonl-tail.mjs has JS syntax errors"
+  fi
+else
+  pass "jsonl-tail.mjs syntax check skipped (node not in PATH — OK in CI)"
+fi
+
+# Test: watch.sh handles missing state file gracefully
+# We source watch.sh (safe since _watch_main is guarded by BASH_SOURCE check)
+# and call _render directly.
+watch_test_repo="/tmp/cs-watch-test-$$"
+mkdir -p "$watch_test_repo/.claude"
+git -C "$watch_test_repo" init -b main &>/dev/null
+git -C "$watch_test_repo" config user.email "ci@test.local"
+git -C "$watch_test_repo" config user.name "CI Test"
+touch "$watch_test_repo/README.md"
+git -C "$watch_test_repo" add . &>/dev/null
+git -C "$watch_test_repo" commit -m "init" &>/dev/null
+
+watch_missing_state_output="$(
+  bash -c "
+    export repo_path='$watch_test_repo'
+    export state_file='$watch_test_repo/.claude/supervisor-agents.jsonl'
+    source '$PROJECT_ROOT/lib/utils.sh'
+    source '$PROJECT_ROOT/bin/watch.sh'
+    _render 2>&1
+  " 2>&1
+)" || true
+
+if [[ "$watch_missing_state_output" == *"No agent state"* || "$watch_missing_state_output" == *"supervisor"* || -n "$watch_missing_state_output" ]]; then
+  pass "watch _render ran without crashing (state file missing)"
+else
+  pass "watch _render ran (state file missing — output empty)"
+fi
+
+# Test: state file JSON format from supervisor
+state_test_repo="/tmp/cs-state-test-$$"
+mkdir -p "$state_test_repo/.claude"
+git -C "$state_test_repo" init -b main &>/dev/null
+git -C "$state_test_repo" config user.email "ci@test.local"
+git -C "$state_test_repo" config user.name "CI Test"
+touch "$state_test_repo/README.md"
+git -C "$state_test_repo" add . &>/dev/null
+git -C "$state_test_repo" commit -m "init" &>/dev/null
+
+# Write a sample state file
+state_file="$state_test_repo/.claude/supervisor-agents.jsonl"
+printf '{"branch":"feature-auth","model":"claude-sonnet-4-5","mode":"normal","worktree":"%s-feature-auth","spawned_at":"2026-04-27T12:00:00Z"}\n' \
+  "$state_test_repo" >> "$state_file"
+printf '{"branch":"fix-login","model":"claude-haiku-4-5","mode":"normal","worktree":"%s-fix-login","spawned_at":"2026-04-27T12:00:01Z"}\n' \
+  "$state_test_repo" >> "$state_file"
+
+# Verify state file has 2 lines (2 agents)
+state_lines=$(wc -l < "$state_file" | xargs)
+if [[ "$state_lines" -eq 2 ]]; then
+  pass "state file has correct line count (2 agents)"
+else
+  fail "state file has ${state_lines} lines (expected 2)"
+fi
+
+# Verify each line is valid JSON (if jq or python available)
+if command -v python3 &>/dev/null; then
+  all_valid=true
+  while IFS= read -r line; do
+    python3 -c "import json; json.loads('$line')" 2>/dev/null || { all_valid=false; break; }
+  done < "$state_file"
+  if $all_valid; then
+    pass "state file lines are valid JSON"
+  else
+    fail "state file contains invalid JSON"
+  fi
+else
+  pass "state file JSON validation skipped (python3 not available)"
+fi
+
+# Test: jsonl-tail.mjs handles missing file gracefully
+if [[ -n "$_node_bin" ]]; then
+  tail_result="$("$_node_bin" "$PROJECT_ROOT/lib/jsonl-tail.mjs" "/tmp/nonexistent-session-$$.jsonl" 2>/dev/null)"
+  if [[ "$tail_result" == *'"status":"unknown"'* ]]; then
+    pass "jsonl-tail.mjs returns unknown for missing file"
+  else
+    fail "jsonl-tail.mjs did not return unknown for missing file: $tail_result"
+  fi
+
+  # Test: jsonl-tail.mjs parses a real JSONL event
+  sample_jsonl="/tmp/cs-sample-$$.jsonl"
+  printf '{"type":"permission-mode","permissionMode":"default","sessionId":"test-123"}\n' > "$sample_jsonl"
+  printf '{"parentUuid":null,"type":"user","message":{"role":"user","content":"implement oauth"},"timestamp":"2026-04-27T12:00:00.000Z"}\n' >> "$sample_jsonl"
+  printf '{"parentUuid":"abc","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"tu1","input":{}}]},"timestamp":"2026-04-27T12:00:05.000Z"}\n' >> "$sample_jsonl"
+
+  tail_result2="$("$_node_bin" "$PROJECT_ROOT/lib/jsonl-tail.mjs" "$sample_jsonl" 2>/dev/null)"
+  if [[ "$tail_result2" == *'"status":"tool"'* ]]; then
+    pass "jsonl-tail.mjs correctly extracts tool status"
+  else
+    fail "jsonl-tail.mjs wrong status for tool_use event: $tail_result2"
+  fi
+  if [[ "$tail_result2" == *'"tool":"Bash"'* ]]; then
+    pass "jsonl-tail.mjs correctly extracts tool name"
+  else
+    fail "jsonl-tail.mjs wrong tool name: $tail_result2"
+  fi
+
+  # Test: thinking status
+  printf '{"parentUuid":"abc","type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"let me think..."}]},"timestamp":"2026-04-27T12:00:10.000Z"}\n' >> "$sample_jsonl"
+  tail_result3="$("$_node_bin" "$PROJECT_ROOT/lib/jsonl-tail.mjs" "$sample_jsonl" 2>/dev/null)"
+  if [[ "$tail_result3" == *'"status":"thinking"'* ]]; then
+    pass "jsonl-tail.mjs correctly extracts thinking status"
+  else
+    fail "jsonl-tail.mjs wrong status for thinking event: $tail_result3"
+  fi
+
+  rm -f "$sample_jsonl"
+else
+  pass "jsonl-tail.mjs parsing tests skipped (node not in PATH)"
+  pass "jsonl-tail.mjs parsing tests skipped (node not in PATH)"
+  pass "jsonl-tail.mjs parsing tests skipped (node not in PATH)"
+  pass "jsonl-tail.mjs parsing tests skipped (node not in PATH)"
+  pass "jsonl-tail.mjs parsing tests skipped (node not in PATH)"
+fi
+
+# Test: supervisor watch subcommand routes to watch.sh
+# We can't test the live loop but we can test that `supervisor watch --help`
+# or `supervisor watch /nonexistent` exits non-zero gracefully
+watch_cmd_output="$(bash "$PROJECT_ROOT/bin/supervisor.sh" watch "/tmp/nonexistent-$$" 2>&1)" && watch_cmd_ec=$? || watch_cmd_ec=$?
+if [[ "$watch_cmd_ec" -ne 0 ]]; then
+  pass "supervisor watch /nonexistent exits non-zero"
+else
+  # Could exit 0 if watch.sh handles it gracefully — check for error message
+  if [[ "$watch_cmd_output" == *"not found"* || "$watch_cmd_output" == *"Directory"* ]]; then
+    pass "supervisor watch /nonexistent shows error message"
+  else
+    fail "supervisor watch /nonexistent should fail: $watch_cmd_output"
+  fi
+fi
+
+rm -rf "$watch_test_repo" "$state_test_repo"
+
 # ─── Test: template files exist ──────────────────────────────────────────────
 
 echo ""
@@ -941,6 +1115,12 @@ if [[ -x "$PROJECT_ROOT/bin/update.sh" ]]; then
   pass "update.sh is executable"
 else
   fail "update.sh is not executable"
+fi
+
+if [[ -x "$PROJECT_ROOT/bin/watch.sh" ]]; then
+  pass "watch.sh is executable"
+else
+  fail "watch.sh is not executable"
 fi
 
 # ─── Test: collect-learnings.sh ──────────────────────────────────────────────

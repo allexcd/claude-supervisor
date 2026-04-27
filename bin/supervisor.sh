@@ -36,6 +36,22 @@ for arg in "$@"; do
 done
 export RESET_BILLING
 
+# ── Subcommands ──────────────────────────────────────────────────────────────
+# Dispatch subcommands before the main flow.
+
+if [[ ${#args[@]} -gt 0 ]]; then
+  case "${args[0]}" in
+    watch)
+      # supervisor watch [repo_path]
+      exec "$SCRIPT_DIR/watch.sh" "${args[1]:-$PWD}"
+      ;;
+    update)
+      # supervisor update [repo_path]
+      exec "$SCRIPT_DIR/update.sh" "${args[1]:-$PWD}"
+      ;;
+  esac
+fi
+
 repo_path="${args[0]:-$PWD}"
 
 # Resolve to absolute path
@@ -260,6 +276,22 @@ total_tasks=$(grep -c '^\[task\]' "$tasks_file" 2>/dev/null || echo "0")
 
 step "4/4 — Spawning agents  (${total_tasks} task block(s) found in tasks.conf)"
 
+# ── Compute session and repo identifiers early (needed for watch window) ─────
+session="$(basename "$repo_path")-agents"
+repo_parent="$(dirname "$repo_path")"
+repo_name="$(basename "$repo_path")"
+
+# ── Reset agent state file (watch dashboard reads this) ───────────────────
+state_file="$repo_path/.claude/supervisor-agents.jsonl"
+mkdir -p "$(dirname "$state_file")"
+: > "$state_file"  # truncate
+
+# ── Pre-create tmux session with watch window as window 0 ─────────────────
+if ! tmux has-session -t "$session" 2>/dev/null; then
+  tmux new-session -d -s "$session" -n "watch" -c "$repo_path" \
+    "bash \"$SCRIPT_DIR/watch.sh\" \"$repo_path\"" 2>/dev/null || true
+fi
+
 agent_index=0
 agent_count=0
 
@@ -331,7 +363,14 @@ _spawn_current_task() {
   _spawned_prompts+=("$prompt")
 
   # Spawn the agent
+  local worktree_path="${repo_parent}/${repo_name}-${branch}"
   "$SCRIPT_DIR/spawn-agent.sh" "$repo_path" "$branch" "$model" "$mode" "$agent_index" "$prompt"
+
+  # Append agent metadata to state file (read by supervisor watch)
+  local ts
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf '{"branch":"%s","model":"%s","mode":"%s","worktree":"%s","spawned_at":"%s"}\n' \
+    "$branch" "$model" "$mode" "$worktree_path" "$ts" >> "$state_file"
 
   agent_index=$((agent_index + 1))
   agent_count=$((agent_count + 1))
@@ -380,10 +419,6 @@ fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 
-session="$(basename "$repo_path")-agents"
-repo_parent="$(dirname "$repo_path")"
-repo_name="$(basename "$repo_path")"
-
 echo ""
 printf "${BOLD}═══════════════════════════════════════════════════════════════${RESET}\n"
 printf "  ${GREEN}✓${RESET} Spawned ${GREEN}${agent_count}${RESET} agent(s) in tmux session: ${CYAN}${session}${RESET}\n"
@@ -391,10 +426,12 @@ printf "${BOLD}═════════════════════�
 echo ""
 
 # Show per-agent instructions
-printf "  ${BOLD}Option A — Attach to tmux (all agents in one place):${RESET}\n"
+printf "  ${BOLD}Option A — Attach to tmux (all agents + live watch dashboard):${RESET}\n"
 echo ""
 printf "    ${CYAN}tmux attach -t ${session}${RESET}\n"
 echo ""
+printf "    ${BOLD}Window 0${RESET} — live status dashboard (supervisor watch)\n"
+printf "    ${BOLD}Windows 1+${RESET} — individual agents\n"
 printf "    Navigate: ${BOLD}Ctrl+b n${RESET} (next)  ${BOLD}Ctrl+b p${RESET} (prev)  ${BOLD}Ctrl+b w${RESET} (list)\n"
 printf "    Detach:   ${BOLD}Ctrl+b d${RESET} (agents keep running in background)\n"
 echo ""
@@ -410,17 +447,21 @@ for i in "${!_spawned_branches[@]}"; do
   local_mode="${_spawned_modes[$i]}"
   local_prompt="${_spawned_prompts[$i]}"
   local_wt="${repo_parent}/${repo_name}-${local_branch}"
-  local_prompt_short=$(echo "$local_prompt" | head -c 60 | tr '\n' ' ')
-  
+  local_prompt_short="${local_prompt:0:60}"
+
   local_cmd="cd ${local_wt} && claude"
   [[ -n "$local_model" ]] && local_cmd+=" --model ${local_model}"
   [[ "$local_mode" == "plan" ]] && local_cmd+=" --permission-mode plan"
-  
+
   printf "    ${BOLD}Tab %d${RESET} — %s\n" "$((i + 1))" "$local_prompt_short"
   printf "    ${CYAN}%s${RESET}\n\n" "$local_cmd"
 done
 
 printf "    Then paste the task prompt into Claude when it loads.\n"
+echo ""
+printf "  ${BOLD}Live dashboard (in a separate terminal):${RESET}\n"
+echo ""
+printf "    ${CYAN}supervisor watch %s${RESET}\n" "$repo_path"
 echo ""
 printf "${BOLD}═══════════════════════════════════════════════════════════════${RESET}\n"
 echo ""
