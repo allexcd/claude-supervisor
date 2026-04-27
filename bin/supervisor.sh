@@ -49,6 +49,10 @@ if [[ ${#args[@]} -gt 0 ]]; then
       # supervisor update [repo_path]
       exec "$SCRIPT_DIR/update.sh" "${args[1]:-$PWD}"
       ;;
+    on-stop)
+      # supervisor on-stop (called by Claude Code Stop hook)
+      exec "$SCRIPT_DIR/on-stop.sh"
+      ;;
   esac
 fi
 

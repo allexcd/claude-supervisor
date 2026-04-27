@@ -1053,21 +1053,26 @@ if [[ ! -d "$PROJECT_ROOT/templates/.claude/commands" ]]; then
 else
   fail "templates/.claude/commands/ should have been removed"
 fi
-if [[ ! -d "$PROJECT_ROOT/templates/.claude/skills" ]]; then
-  pass "templates/.claude/skills/ removed (workspace-kit owns it)"
+if [[ ! -f "$PROJECT_ROOT/templates/.claude/skills/_example-skill/SKILL.md" ]]; then
+  pass "templates/.claude/skills/_example-skill removed (workspace-kit owns it)"
 else
-  fail "templates/.claude/skills/ should have been removed"
+  fail "templates/.claude/skills/_example-skill should have been removed"
 fi
+# Supervisor-specific skills (share, peers) live in templates/ — NOT workspace-kit
+assert_file_exists "templates/.claude/skills/share/SKILL.md exists"  "$PROJECT_ROOT/templates/.claude/skills/share/SKILL.md"
+assert_file_exists "templates/.claude/skills/peers/SKILL.md exists"  "$PROJECT_ROOT/templates/.claude/skills/peers/SKILL.md"
 
 # Verify tasks.conf uses INI block format
 tasks_conf_content="$(cat "$PROJECT_ROOT/templates/tasks.conf")"
 assert_contains "tasks.conf has [task] headers" "[task]" "$tasks_conf_content"
 assert_contains "tasks.conf has prompt field" "prompt =" "$tasks_conf_content"
 
-# Verify settings.local.json contains PermissionRequest hook (supervisor's overlay)
+# Verify settings.local.json contains PermissionRequest and Stop hooks
 settings_local_content="$(cat "$PROJECT_ROOT/templates/.claude/settings.local.json")"
-assert_contains "settings.local.json has PermissionRequest hook" "PermissionRequest" "$settings_local_content"
-assert_contains "settings.local.json routes to Opus"             "claude-opus-4-7"   "$settings_local_content"
+assert_contains "settings.local.json has PermissionRequest hook" "PermissionRequest"  "$settings_local_content"
+assert_contains "settings.local.json routes to Opus"             "claude-opus-4-7"    "$settings_local_content"
+assert_contains "settings.local.json has Stop hook"              "Stop"               "$settings_local_content"
+assert_contains "settings.local.json Stop hook calls on-stop"    "supervisor on-stop" "$settings_local_content"
 
 # Verify _example-agent.md has required frontmatter
 example_agent_content="$(cat "$PROJECT_ROOT/templates/.claude/agents/_example-agent.md")"
@@ -1086,6 +1091,136 @@ if [[ -x "$PROJECT_ROOT/bin/update.sh" ]]; then
 else
   fail "update.sh is not executable"
 fi
+
+# ─── Test: Stop hook and shared notes (Phase 3) ──────────────────────────────
+
+echo ""
+echo "stop hook and shared notes"
+echo "──────────────────────────"
+
+# Verify on-stop.sh exists and is executable
+assert_file_exists "bin/on-stop.sh exists" "$PROJECT_ROOT/bin/on-stop.sh"
+if [[ -x "$PROJECT_ROOT/bin/on-stop.sh" ]]; then
+  pass "on-stop.sh is executable"
+else
+  fail "on-stop.sh is not executable"
+fi
+
+# Verify bash syntax
+if bash -n "$PROJECT_ROOT/bin/on-stop.sh" 2>/dev/null; then
+  pass "on-stop.sh has valid bash syntax"
+else
+  fail "on-stop.sh has bash syntax errors"
+fi
+
+# Test: on-stop.sh appends to session summary and finds main repo from worktree
+onstop_repo="/tmp/cs-onstop-main-$$"
+mkdir -p "$onstop_repo/.claude"
+git -C "$onstop_repo" init -b main &>/dev/null
+git -C "$onstop_repo" config user.email "ci@test.local"
+git -C "$onstop_repo" config user.name "CI Test"
+cat > "$onstop_repo/.claude/CLAUDE.md" <<'CLAUDE'
+# Project Memory
+
+## Known Pitfalls
+- existing pitfall
+
+---
+CLAUDE
+touch "$onstop_repo/README.md"
+git -C "$onstop_repo" add . &>/dev/null
+git -C "$onstop_repo" commit -m "init" &>/dev/null
+
+# Create a worktree
+git -C "$onstop_repo" worktree add "${onstop_repo}-agent-branch" -b "agent-branch" &>/dev/null
+
+# Run on-stop.sh from the worktree directory
+onstop_out="$(cd "${onstop_repo}-agent-branch" && bash "$PROJECT_ROOT/bin/on-stop.sh" 2>&1)" || true
+
+# Verify session summary was written to the MAIN repo
+summary_file="$onstop_repo/.claude/supervisor-session-summary.jsonl"
+if [[ -f "$summary_file" ]]; then
+  pass "on-stop.sh wrote session summary to main repo"
+  summary_content="$(cat "$summary_file")"
+  if [[ "$summary_content" == *'"branch":"agent-branch"'* ]]; then
+    pass "session summary contains correct branch name"
+  else
+    fail "session summary missing branch name: $summary_content"
+  fi
+  if [[ "$summary_content" == *'"finished_at"'* ]]; then
+    pass "session summary contains finished_at timestamp"
+  else
+    fail "session summary missing finished_at: $summary_content"
+  fi
+else
+  fail "on-stop.sh did not write session summary (expected at $summary_file): $onstop_out"
+fi
+
+# Test: on-stop.sh outside a git repo exits 0 with a message (graceful)
+onstop_nogit_out="$(cd /tmp && bash "$PROJECT_ROOT/bin/on-stop.sh" 2>&1)" && onstop_nogit_ec=$? || onstop_nogit_ec=$?
+if [[ "$onstop_nogit_ec" -eq 0 ]]; then
+  pass "on-stop.sh exits 0 when not in a git repo"
+else
+  fail "on-stop.sh should exit 0 outside a git repo (got $onstop_nogit_ec)"
+fi
+
+rm -rf "$onstop_repo" "${onstop_repo}-agent-branch"
+
+# Test: supervisor on-stop subcommand routes to on-stop.sh
+# Call from /tmp (not a git repo) — should exit 0 with a message
+supervisor_onstop_out="$(cd /tmp && bash "$PROJECT_ROOT/bin/supervisor.sh" on-stop 2>&1)" && supervisor_onstop_ec=$? || supervisor_onstop_ec=$?
+if [[ "$supervisor_onstop_ec" -eq 0 ]]; then
+  pass "supervisor on-stop subcommand exits 0 (routes to on-stop.sh)"
+else
+  fail "supervisor on-stop subcommand failed (exit $supervisor_onstop_ec): $supervisor_onstop_out"
+fi
+
+# Test: spawn-agent.sh creates agents-shared symlink
+spawn_shared_repo="/tmp/cs-spawn-shared-$$"
+mkdir -p "$spawn_shared_repo/.claude/agents-shared"
+git -C "$spawn_shared_repo" init -b main &>/dev/null
+git -C "$spawn_shared_repo" config user.email "ci@test.local"
+git -C "$spawn_shared_repo" config user.name "CI Test"
+touch "$spawn_shared_repo/README.md"
+git -C "$spawn_shared_repo" add . &>/dev/null
+git -C "$spawn_shared_repo" commit -m "init" &>/dev/null
+
+mkdir -p "/tmp/mock-shared-tmux-$$"
+cat > "/tmp/mock-shared-tmux-$$/tmux" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+chmod +x "/tmp/mock-shared-tmux-$$/tmux"
+
+PATH="/tmp/mock-shared-tmux-$$:$PATH" bash "$PROJECT_ROOT/bin/spawn-agent.sh" \
+  "$spawn_shared_repo" "shared-branch" "claude-sonnet-4-5" "normal" "0" "test" &>/dev/null || true
+
+shared_link="$spawn_shared_repo/../$(basename "$spawn_shared_repo")-shared-branch/.claude/agents-shared"
+if [[ -L "$shared_link" ]]; then
+  pass "spawn-agent.sh creates agents-shared symlink in worktree"
+  link_target="$(readlink "$shared_link")"
+  if [[ "$link_target" == "$spawn_shared_repo/.claude/agents-shared" ]]; then
+    pass "agents-shared symlink points to main repo"
+  else
+    fail "agents-shared symlink wrong target: $link_target (expected $spawn_shared_repo/.claude/agents-shared)"
+  fi
+else
+  fail "spawn-agent.sh did not create agents-shared symlink at $shared_link"
+fi
+
+rm -rf "$spawn_shared_repo" "$spawn_shared_repo-shared-branch" "/tmp/mock-shared-tmux-$$"
+
+# Test: /share skill has required frontmatter
+share_skill_content="$(cat "$PROJECT_ROOT/templates/.claude/skills/share/SKILL.md")"
+assert_contains "share SKILL.md has name field"        "name:"    "$share_skill_content"
+assert_contains "share SKILL.md has description field" "description:" "$share_skill_content"
+assert_contains "share SKILL.md mentions agents-shared" "agents-shared" "$share_skill_content"
+
+# Test: /peers skill has required frontmatter
+peers_skill_content="$(cat "$PROJECT_ROOT/templates/.claude/skills/peers/SKILL.md")"
+assert_contains "peers SKILL.md has name field"        "name:"    "$peers_skill_content"
+assert_contains "peers SKILL.md has description field" "description:" "$peers_skill_content"
+assert_contains "peers SKILL.md mentions agents-shared" "agents-shared" "$peers_skill_content"
 
 # ─── Test: scripts are executable ────────────────────────────────────────────
 
@@ -1121,6 +1256,12 @@ if [[ -x "$PROJECT_ROOT/bin/watch.sh" ]]; then
   pass "watch.sh is executable"
 else
   fail "watch.sh is not executable"
+fi
+
+if [[ -x "$PROJECT_ROOT/bin/on-stop.sh" ]]; then
+  pass "on-stop.sh is executable"
+else
+  fail "on-stop.sh is not executable"
 fi
 
 # ─── Test: collect-learnings.sh ──────────────────────────────────────────────
