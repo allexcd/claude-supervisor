@@ -48,7 +48,7 @@ if [[ ${#args[@]} -gt 0 ]]; then
     watch)     exec "$SCRIPT_DIR/watch.sh" "${args[1]:-$PWD}" ;;
     update)    exec "$SCRIPT_DIR/update.sh" "${args[1]:-$PWD}" ;;
     on-stop)   exec "$SCRIPT_DIR/on-stop.sh" ;;
-    migrate)   exec "$SCRIPT_DIR/migrate.sh" "${args[1]:-$PWD}" ;;
+    migrate)   exec "$SCRIPT_DIR/migrate.sh" "${args[@]:1}" ;;
     uninstall) exec "$SCRIPT_DIR/uninstall.sh" "${args[@]:1}" ;;
     doctor)    exec "$SCRIPT_DIR/doctor.sh" "${args[1]:-$PWD}" ;;
     run)

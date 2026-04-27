@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # bin/uninstall.sh — Remove claude-supervisor from a project
 #
-# Usage: supervisor uninstall [--dry-run] [--with-workspace] [--everything] [repo_path]
+# Usage: supervisor uninstall [--dry-run] [--yes] [--with-workspace] [--everything] [repo_path]
 #
 # Flags:
 #   --dry-run         Print plan and exit without changing anything
+#   --yes, -y         Non-interactive: confirm removal automatically
 #   --with-workspace  Also prompt to run `npx claude-workspace-kit uninstall`
 #   --everything      Also kill tmux session, remove worktrees, delete branches
 #
@@ -29,6 +30,7 @@ source "$SCRIPT_DIR/../lib/utils.sh"
 DRY_RUN=false
 WITH_WORKSPACE=false
 EVERYTHING=false
+YES=false
 repo_path=""
 
 for arg in "$@"; do
@@ -36,6 +38,7 @@ for arg in "$@"; do
     --dry-run)         DRY_RUN=true ;;
     --with-workspace)  WITH_WORKSPACE=true ;;
     --everything)      EVERYTHING=true ;;
+    --yes|-y)          YES=true ;;
     *)
       if [[ -z "$repo_path" ]]; then
         repo_path="$arg"
@@ -130,8 +133,12 @@ if $DRY_RUN; then
   exit 0
 fi
 
-printf "Proceed? [y/N] "
-read -r _confirm </dev/tty || _confirm="n"
+if $YES; then
+  _confirm="y"
+else
+  printf "Proceed? [y/N] "
+  read -r _confirm </dev/tty || _confirm="n"
+fi
 [[ "$_confirm" =~ ^[Yy] ]] || { echo "Cancelled."; exit 0; }
 echo ""
 
@@ -163,8 +170,8 @@ fi
 
 if [[ -f "$repo_path/.gitignore" ]]; then
   local_tmp="$(mktemp)"
-  grep -v '^\.claude/agents-shared/$' "$repo_path/.gitignore" > "$local_tmp" && \
-    mv "$local_tmp" "$repo_path/.gitignore"
+  grep -v '\.claude/agents-shared/' "$repo_path/.gitignore" > "$local_tmp" || true
+  mv "$local_tmp" "$repo_path/.gitignore"
   ok "Cleaned .gitignore"
 fi
 

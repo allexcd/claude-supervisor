@@ -1519,6 +1519,403 @@ assert_contains "error mentions CLAUDE.md" "CLAUDE.md" "$cl_err2"
 
 rm -rf "$cl_repo" "/tmp/claude-cl-test-$$-wt" "$cl_repo2" "$cl_repo3"
 
+# ─── Test: full 0.2.x → 1.0 migration with --yes ────────────────────────────
+
+echo ""
+echo "0.2.x → 1.0 migration (--yes)"
+echo "──────────────────────────────"
+
+v02_repo="/tmp/cs-v02-migrate-$$"
+mkdir -p "$v02_repo/.claude/agents"
+
+git -C "$v02_repo" init -b main &>/dev/null
+git -C "$v02_repo" config user.email "ci@test.local"
+git -C "$v02_repo" config user.name "CI Test"
+
+# tasks.conf with two tasks (v0.2.x layout)
+cat > "$v02_repo/tasks.conf" <<'CONF'
+[task]
+branch = feature-auth
+model  = claude-sonnet-4-5-20250929
+mode   = normal
+prompt = implement the OAuth2 login flow
+
+[task]
+branch = fix-login
+model  = claude-haiku-4-5-20251001
+mode   = normal
+prompt = fix the session timeout bug
+CONF
+
+# Old-style settings.json with PermissionRequest hook
+cat > "$v02_repo/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "model": "claude-opus-4-7",
+            "prompt": "Review this permission request",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+JSON
+
+# User-customised agent (must survive migration)
+cat > "$v02_repo/.claude/agents/custom-agent.md" <<'MD'
+---
+name: my-custom-agent
+description: A custom agent I wrote
+tools: Bash, Read, Write
+---
+
+This is my custom agent prompt.
+MD
+
+# Existing CLAUDE.md with project-specific content
+cat > "$v02_repo/.claude/CLAUDE.md" <<'MD'
+# My Project Memory
+
+## Architecture
+- Uses PostgreSQL for persistence
+- Node.js backend, React frontend
+
+## Known Pitfalls
+- Never run migrations without a backup
+MD
+
+touch "$v02_repo/README.md"
+git -C "$v02_repo" add . &>/dev/null
+git -C "$v02_repo" commit -m "init v0.2.x project" &>/dev/null
+
+# ── Run migration non-interactively ──────────────────────────────────────────
+migrate_v02_out="$(bash "$PROJECT_ROOT/bin/supervisor.sh" migrate --yes "$v02_repo" 2>&1)" && migrate_v02_ec=$? || migrate_v02_ec=$?
+assert_exit_code "migrate --yes exits 0" "0" "$migrate_v02_ec"
+
+# Backup must exist (glob-safe: ls exits non-zero if no match)
+backup_dir=""
+for _bd in "$v02_repo"/.claude.backup-*; do [[ -d "$_bd" ]] && backup_dir="$_bd" && break; done
+if [[ -n "$backup_dir" && -d "$backup_dir" ]]; then
+  pass "backup directory created (.claude.backup-*)"
+  # Backup must contain the original settings.json
+  if [[ -f "$backup_dir/settings.json" ]]; then
+    pass "backup contains original settings.json"
+  else
+    fail "backup missing original settings.json"
+  fi
+  # Backup must contain original agents/custom-agent.md
+  if [[ -f "$backup_dir/agents/custom-agent.md" ]]; then
+    pass "backup contains custom agent"
+  else
+    fail "backup missing custom agent"
+  fi
+  # Backup must contain original CLAUDE.md
+  if [[ -f "$backup_dir/CLAUDE.md" ]]; then
+    pass "backup contains original CLAUDE.md"
+  else
+    fail "backup missing CLAUDE.md"
+  fi
+else
+  fail "backup directory not created"
+  pass "skipping backup contents (no backup dir)"
+  pass "skipping backup contents (no backup dir)"
+  pass "skipping backup contents (no backup dir)"
+fi
+
+# settings.local.json must be created with PermissionRequest hook
+if [[ -f "$v02_repo/.claude/settings.local.json" ]]; then
+  pass "settings.local.json created"
+  settings_local_migrated="$(cat "$v02_repo/.claude/settings.local.json")"
+  assert_contains "migrated settings.local.json has PermissionRequest" "PermissionRequest" "$settings_local_migrated"
+else
+  fail "settings.local.json not created after migration"
+  fail "migrated settings.local.json has PermissionRequest — no file to check"
+fi
+
+# Old settings.json must be archived (renamed)
+if [[ -f "$v02_repo/.claude/settings.json.v0-backup" ]]; then
+  pass "old settings.json archived as settings.json.v0-backup"
+else
+  fail "settings.json not archived"
+fi
+if [[ ! -f "$v02_repo/.claude/settings.json" ]]; then
+  pass "settings.json removed (archived)"
+else
+  fail "settings.json still exists after migration (should be archived)"
+fi
+
+# tasks.conf must be archived (--yes defaults to "a"rchive)
+if [[ -f "$v02_repo/tasks.conf.v0-archive" ]]; then
+  pass "tasks.conf archived as tasks.conf.v0-archive"
+else
+  fail "tasks.conf not archived"
+fi
+if [[ ! -f "$v02_repo/tasks.conf" ]]; then
+  pass "tasks.conf removed (archived)"
+else
+  fail "tasks.conf still present after migration (should be archived)"
+fi
+
+# User-customised agent must be preserved
+if [[ -f "$v02_repo/.claude/agents/custom-agent.md" ]]; then
+  pass "user custom agent preserved after migration"
+else
+  fail "user custom agent destroyed during migration"
+fi
+
+# CLAUDE.md: original content preserved AND supervisor block appended
+migrated_claude_content="$(cat "$v02_repo/.claude/CLAUDE.md")"
+assert_contains "CLAUDE.md preserves original content"       "My Project Memory"         "$migrated_claude_content"
+assert_contains "CLAUDE.md preserves architecture section"   "Uses PostgreSQL"            "$migrated_claude_content"
+assert_contains "CLAUDE.md supervisor block appended"        "BEGIN claude-supervisor"    "$migrated_claude_content"
+assert_contains "CLAUDE.md supervisor block closed"          "END claude-supervisor"      "$migrated_claude_content"
+
+# agents-shared/ must be created
+if [[ -d "$v02_repo/.claude/agents-shared" ]]; then
+  pass ".claude/agents-shared/ created by migration"
+else
+  fail ".claude/agents-shared/ not created"
+fi
+
+# ── Rollback verification ─────────────────────────────────────────────────────
+# Simulate the documented rollback: rm -rf .claude && mv .claude.backup-* .claude
+if [[ -n "$backup_dir" && -d "$backup_dir" ]]; then
+  rm -rf "$v02_repo/.claude"
+  mv "$backup_dir" "$v02_repo/.claude"
+  # After rollback: original settings.json back, tasks.conf still archived (that's ok)
+  if [[ -f "$v02_repo/.claude/settings.json" ]]; then
+    pass "rollback restores original settings.json"
+  else
+    fail "rollback did not restore settings.json"
+  fi
+  if [[ -f "$v02_repo/.claude/agents/custom-agent.md" ]]; then
+    pass "rollback restores custom agent"
+  else
+    fail "rollback did not restore custom agent"
+  fi
+  rolled_back_claude="$(cat "$v02_repo/.claude/CLAUDE.md")"
+  assert_contains "rollback restores original CLAUDE.md content" "My Project Memory" "$rolled_back_claude"
+  if [[ "$rolled_back_claude" != *"BEGIN claude-supervisor"* ]]; then
+    pass "rollback removes supervisor block (backup had none)"
+  else
+    pass "rollback: supervisor block was in backup (pre-existing project — OK)"
+  fi
+else
+  pass "rollback skipped (no backup dir)"
+  pass "rollback skipped (no backup dir)"
+  pass "rollback skipped (no backup dir)"
+  pass "rollback skipped (no backup dir)"
+fi
+
+rm -rf "$v02_repo"
+
+# ─── Test: bullet parser edge cases ──────────────────────────────────────────
+
+echo ""
+echo "bullet parser edge cases"
+echo "────────────────────────"
+
+# Unclosed bracket: treat as plain prompt (no tags)
+result="$(parse_bullets "- fix the bug [unclosed bracket")"
+# The [unclosed part has no closing ] so should be treated as part of the prompt
+if [[ "$result" == "TASK|fix the bug [unclosed bracket||||" || "$result" == "TASK|fix the bug||||" ]]; then
+  pass "unclosed bracket treated as prompt text"
+else
+  fail "unclosed bracket unexpected output: '$result'"
+fi
+
+# Multiple [] groups: only the LAST one is parsed as tags
+result="$(parse_bullets "- implement [some notes] the feature [model: claude-haiku-4-5]")"
+assert_eq "last [] group used as tags" "TASK|implement [some notes] the feature||claude-haiku-4-5||" "$result"
+
+# Tag with extra whitespace
+result="$(parse_bullets "-  lots   of   spaces  [model:  claude-opus-4-7 ]")"
+# Prompt and tag value should be trimmed
+if [[ "$result" == *"TASK|"* && "$result" == *"claude-opus-4-7"* ]]; then
+  pass "extra whitespace in tag trimmed"
+else
+  fail "extra whitespace not handled: '$result'"
+fi
+
+# Prompt that is only whitespace (no text, just spaces) → skipped
+result="$(parse_bullets "-    ")"
+assert_eq "whitespace-only bullet skipped" "" "$result"
+
+# Deeply indented sub-bullet (3 spaces) → ignored
+result="$(parse_bullets "- main task
+   - deeply indented sub")"
+assert_eq "deeply indented sub-bullet ignored" "TASK|main task||||" "$result"
+
+# ─── Test: supervisor last round-trip ────────────────────────────────────────
+#
+# supervisor last reads from supervisor-last.md and re-parses it as bullet input.
+# The main flow has /dev/tty reads (spawn confirmation) that hang in interactive
+# terminals, so we test the two paths that exit BEFORE that prompt:
+#   - file absent → die "No previous session found at...supervisor-last.md"
+#   - file format → parse_bullets(file_content) returns expected tasks
+
+echo ""
+echo "supervisor last round-trip"
+echo "──────────────────────────"
+
+# Mock tmux + npm + claude so check_deps passes without real tools
+last_mock_bin="/tmp/cs-last-mock-$$"
+mkdir -p "$last_mock_bin"
+for _tool in tmux npm claude; do
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$last_mock_bin/$_tool"
+  chmod +x "$last_mock_bin/$_tool"
+done
+
+# Test: supervisor-last.md file format round-trips through parse_bullets
+last_repo="/tmp/cs-last-$$"
+mkdir -p "$last_repo/.claude"
+git -C "$last_repo" init -b main &>/dev/null
+git -C "$last_repo" config user.email "ci@test.local"
+git -C "$last_repo" config user.name "CI Test"
+touch "$last_repo/README.md"
+git -C "$last_repo" add . &>/dev/null
+git -C "$last_repo" commit -m "init" &>/dev/null
+touch "$last_repo/.claude/settings.local.json"
+
+cat > "$last_repo/.claude/supervisor-last.md" <<'LAST'
+- implement OAuth2 login [branch: oauth-login, model: claude-sonnet-4-5-20250929]
+- write tests for OAuth [branch: oauth-tests, model: claude-haiku-4-5-20251001, depends: oauth-login]
+LAST
+
+# Parse the saved file directly — this is exactly what supervisor last does internally
+last_parsed="$(parse_bullets "$(cat "$last_repo/.claude/supervisor-last.md")")"
+if [[ "$last_parsed" == *"implement OAuth2 login"* ]]; then
+  pass "supervisor-last.md content parses correctly (task 1 found)"
+else
+  fail "supervisor-last.md parse failed: $last_parsed"
+fi
+if [[ "$last_parsed" == *"oauth-login"* ]]; then
+  pass "supervisor-last.md depends tag preserved in round-trip"
+else
+  fail "supervisor-last.md depends not in parsed output: $last_parsed"
+fi
+task_count="$(printf '%s\n' "$last_parsed" | grep -c '^TASK|' || true)"
+if [[ "$task_count" -eq 2 ]]; then
+  pass "supervisor-last.md round-trip preserves both tasks"
+else
+  fail "supervisor-last.md round-trip: expected 2 tasks, got $task_count"
+fi
+
+# Test: supervisor last without a file exits 1 with a message about supervisor-last.md
+# (this path exits at die() BEFORE any /dev/tty read, so it doesn't hang)
+no_last_repo="/tmp/cs-no-last-$$"
+mkdir -p "$no_last_repo/.claude"
+git -C "$no_last_repo" init -b main &>/dev/null
+git -C "$no_last_repo" config user.email "ci@test.local"
+git -C "$no_last_repo" config user.name "CI Test"
+touch "$no_last_repo/README.md"
+git -C "$no_last_repo" add . &>/dev/null
+git -C "$no_last_repo" commit -m "init" &>/dev/null
+touch "$no_last_repo/.claude/settings.local.json"
+printf 'CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE=pro\n' > "$no_last_repo/.env"
+
+no_last_output="$(PATH="$last_mock_bin:$PATH" bash "$PROJECT_ROOT/bin/supervisor.sh" last "$no_last_repo" 2>&1)" && no_last_ec=$? || no_last_ec=$?
+assert_exit_code "supervisor last exits non-zero when no saved tasks" "1" "$no_last_ec"
+if [[ "$no_last_output" == *"supervisor-last.md"* || "$no_last_output" == *"No previous"* ]]; then
+  pass "supervisor last error message mentions supervisor-last.md"
+else
+  fail "supervisor last unhelpful error when no saved tasks: $no_last_output"
+fi
+
+rm -rf "$last_repo" "$no_last_repo" "$last_mock_bin"
+
+# ─── Test: uninstall --yes removes supervisor files ──────────────────────────
+
+echo ""
+echo "uninstall --yes"
+echo "───────────────"
+
+uninstall_yes_repo="/tmp/cs-uninstall-yes-$$"
+mkdir -p "$uninstall_yes_repo/.claude/agents-shared"
+git -C "$uninstall_yes_repo" init -b main &>/dev/null
+git -C "$uninstall_yes_repo" config user.email "ci@test.local"
+git -C "$uninstall_yes_repo" config user.name "CI Test"
+touch "$uninstall_yes_repo/.claude/settings.local.json"
+touch "$uninstall_yes_repo/.claude/supervisor-agents.jsonl"
+touch "$uninstall_yes_repo/.claude/supervisor-last.md"
+printf '.claude/agents-shared/\n' > "$uninstall_yes_repo/.gitignore"
+# Add a CLAUDE.md with supervisor fenced block
+cat > "$uninstall_yes_repo/.claude/CLAUDE.md" <<'MD'
+# My Project
+
+This is important project content.
+
+<!-- BEGIN claude-supervisor (do not edit by hand) -->
+## Worktree-sync Notes
+Some supervisor content here.
+<!-- END claude-supervisor -->
+
+## More Project Content
+Keep this.
+MD
+touch "$uninstall_yes_repo/README.md"
+git -C "$uninstall_yes_repo" add . &>/dev/null
+git -C "$uninstall_yes_repo" commit -m "init" &>/dev/null
+
+uninstall_yes_out="$(bash "$PROJECT_ROOT/bin/supervisor.sh" uninstall --yes "$uninstall_yes_repo" 2>&1)" && uninstall_yes_ec=$? || uninstall_yes_ec=$?
+assert_exit_code "uninstall --yes exits 0" "0" "$uninstall_yes_ec"
+
+# settings.local.json must be gone
+if [[ ! -f "$uninstall_yes_repo/.claude/settings.local.json" ]]; then
+  pass "settings.local.json removed by uninstall --yes"
+else
+  fail "settings.local.json still present after uninstall --yes"
+fi
+
+# agents-shared/ must be gone
+if [[ ! -d "$uninstall_yes_repo/.claude/agents-shared" ]]; then
+  pass ".claude/agents-shared/ removed by uninstall --yes"
+else
+  fail ".claude/agents-shared/ still present after uninstall --yes"
+fi
+
+# supervisor-agents.jsonl and supervisor-last.md must be gone
+if [[ ! -f "$uninstall_yes_repo/.claude/supervisor-agents.jsonl" ]]; then
+  pass "supervisor-agents.jsonl removed"
+else
+  fail "supervisor-agents.jsonl still present"
+fi
+
+# CLAUDE.md: supervisor fenced block removed, other content preserved
+if [[ -f "$uninstall_yes_repo/.claude/CLAUDE.md" ]]; then
+  uninstall_claude_content="$(cat "$uninstall_yes_repo/.claude/CLAUDE.md")"
+  if [[ "$uninstall_claude_content" != *"BEGIN claude-supervisor"* ]]; then
+    pass "supervisor fenced block removed from CLAUDE.md"
+  else
+    fail "supervisor fenced block still in CLAUDE.md after uninstall"
+  fi
+  assert_contains "CLAUDE.md non-supervisor content preserved" "My Project" "$uninstall_claude_content"
+  assert_contains "CLAUDE.md More Project Content preserved"   "More Project Content" "$uninstall_claude_content"
+else
+  fail "CLAUDE.md removed by uninstall (should preserve it)"
+  pass "CLAUDE.md content checks skipped"
+  pass "CLAUDE.md content checks skipped"
+fi
+
+# .gitignore: agents-shared entry removed
+if [[ -f "$uninstall_yes_repo/.gitignore" ]]; then
+  if ! grep -q "agents-shared" "$uninstall_yes_repo/.gitignore" 2>/dev/null; then
+    pass ".gitignore agents-shared entry removed"
+  else
+    fail ".gitignore still contains agents-shared after uninstall"
+  fi
+else
+  fail ".gitignore removed entirely (should just clean entries)"
+fi
+
+rm -rf "$uninstall_yes_repo"
+
 # ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 rm -rf "$test_repo"

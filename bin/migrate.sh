@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # bin/migrate.sh — Migrate a claude-supervisor 0.2.x project to 1.0 layout
 #
-# Usage: supervisor migrate [repo_path]
+# Usage: supervisor migrate [--yes] [repo_path]
+#   --yes   Non-interactive: confirm all prompts automatically, skip workspace-kit,
+#           archive tasks.conf. Useful for CI and testing.
 #
 # What it does:
 #   1. Backs up .claude/ to .claude.backup-YYYYMMDD-HHMMSS/
@@ -24,7 +26,16 @@ TEMPLATES_DIR="$SCRIPT_DIR/../templates"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/utils.sh"
 
-repo_path="${1:-$PWD}"
+YES=false
+repo_path=""
+for _arg in "$@"; do
+  case "$_arg" in
+    --yes|-y) YES=true ;;
+    *)        [[ -z "$repo_path" ]] && repo_path="$_arg" ;;
+  esac
+done
+repo_path="${repo_path:-$PWD}"
+
 if [[ -d "$repo_path" ]]; then
   repo_path="$(cd "$repo_path" && pwd)"
 else
@@ -72,8 +83,12 @@ fi
 echo ""
 printf "  ${YELLOW}Recovery:${RESET} rm -rf .claude && mv .claude.backup-* .claude\n"
 echo ""
-printf "Proceed? [y/N] "
-read -r _confirm </dev/tty || _confirm="n"
+if $YES; then
+  _confirm="y"
+else
+  printf "Proceed? [y/N] "
+  read -r _confirm </dev/tty || _confirm="n"
+fi
 [[ "$_confirm" =~ ^[Yy] ]] || { echo "Cancelled."; exit 0; }
 echo ""
 
@@ -110,10 +125,14 @@ fi
 
 # Optionally bootstrap workspace-kit
 if [[ ! -f "$repo_path/.cwk.lock" ]]; then
-  echo ""
-  printf "  Set up project agents and skills via ${CYAN}claude-workspace-kit${RESET}? [Y/n] "
-  read -r _cwk_ans </dev/tty || _cwk_ans="n"
-  _cwk_ans="${_cwk_ans:-Y}"
+  if $YES; then
+    _cwk_ans="n"
+  else
+    echo ""
+    printf "  Set up project agents and skills via ${CYAN}claude-workspace-kit${RESET}? [Y/n] "
+    read -r _cwk_ans </dev/tty || _cwk_ans="n"
+    _cwk_ans="${_cwk_ans:-Y}"
+  fi
   if [[ "$_cwk_ans" =~ ^[Yy] ]] && command -v npx &>/dev/null; then
     info "Running npx claude-workspace-kit init..."
     npx --yes claude-workspace-kit init "$repo_path" || warn "workspace-kit init failed — skipping"
@@ -170,22 +189,26 @@ if $has_tasks_conf; then
   echo ""
   printf "${BOLD}tasks.conf found:${RESET}\n"
   echo ""
-  cat "$repo_path/tasks.conf" | head -20 | sed 's/^/    /'
+  head -20 "$repo_path/tasks.conf" | sed 's/^/    /'
   echo ""
-  printf "  What would you like to do?\n"
-  printf "    a) Archive it (rename to tasks.conf.v0-archive)\n"
-  printf "    s) Spawn from it now with the new supervisor\n"
-  printf "    k) Keep it as-is\n"
-  printf "  Choice [a]: "
-  read -r _tc_choice </dev/tty || _tc_choice="a"
-  _tc_choice="${_tc_choice:-a}"
+  if $YES; then
+    _tc_choice="a"
+  else
+    printf "  What would you like to do?\n"
+    printf "    a) Archive it (rename to tasks.conf.v0-archive)\n"
+    printf "    s) Spawn from it now with the new supervisor\n"
+    printf "    k) Keep it as-is\n"
+    printf "  Choice [a]: "
+    read -r _tc_choice </dev/tty || _tc_choice="a"
+    _tc_choice="${_tc_choice:-a}"
+  fi
 
-  case "${_tc_choice,,}" in
-    a)
+  case "$_tc_choice" in
+    a|A)
       mv "$repo_path/tasks.conf" "$repo_path/tasks.conf.v0-archive"
       ok "Archived tasks.conf → tasks.conf.v0-archive"
       ;;
-    s)
+    s|S)
       ok "Keeping tasks.conf for one-time spawn — run: supervisor"
       ;;
     *)

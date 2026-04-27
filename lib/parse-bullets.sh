@@ -28,8 +28,8 @@ parse_bullets() {
   while IFS= read -r line; do
     # Skip comment lines
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    # Skip indented sub-bullets (at least 2 spaces before the bullet marker)
-    [[ "$line" =~ ^[[:space:]][[:space:]][-*+] ]] && continue
+    # Skip indented sub-bullets (2 or more leading spaces before the bullet marker)
+    [[ "$line" =~ ^[[:space:]][[:space:]][[:space:]]*[-*+] ]] && continue
     # Must be a top-level bullet: optional leading space, then - * or +
     [[ "$line" =~ ^[[:space:]]*[-*+][[:space:]]+(.*) ]] || continue
 
