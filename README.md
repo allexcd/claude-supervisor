@@ -137,7 +137,7 @@ If you accept the workspace-kit prompt, `.claude/agents/`, `.claude/skills/`, et
 
 ### 2. Enter your tasks
 
-On next run supervisor opens `$EDITOR` with a task stub. Save and close to spawn agents:
+After scaffolding, supervisor opens `$EDITOR` with a task stub in the same run. Save and close to spawn agents:
 
 ```markdown
 - review the codebase and write an implementation plan [plan, model: opus]
@@ -508,7 +508,7 @@ npm test
 bash tests/smoke.sh
 ```
 
-185 tests covering: bullet parser (all tag combinations), auto-init flows, watch dashboard, jsonl-tail, stop hook, shared-notes symlink, dependency staging, migrate/uninstall/doctor routing, spawn-agent, collect-learnings, and more. No API key or tmux required.
+224 tests covering: bullet parser (all tag combinations), auto-init flows, watch dashboard, jsonl-tail, stop hook, shared-notes symlink, dependency staging, migrate/uninstall/doctor routing, spawn-agent, collect-learnings, and more. No API key or tmux required.
 
 ---
 
