@@ -174,13 +174,17 @@ _make_mock_npx_fail "$mock_bin_init"
 # Run supervisor with mocked npx (fails → minimal fallback) and answer "n" to stdin
 output="$(echo "n" | PATH="$mock_bin_init:$PATH" bash "$PROJECT_ROOT/bin/supervisor.sh" "$test_repo" 2>&1)" || true
 
-assert_file_exists "tasks.conf created (minimal)"     "$test_repo/tasks.conf"
+if [[ ! -f "$test_repo/tasks.conf" ]]; then
+  pass "tasks.conf not created (removed in 1.0)"
+else
+  fail "tasks.conf should not be created in 1.0 init"
+fi
 assert_file_exists ".claude/ created (minimal)"        "$test_repo/.claude"
 assert_file_exists ".claude/CLAUDE.md created"         "$test_repo/.claude/CLAUDE.md"
 assert_file_exists ".claude/settings.local.json"       "$test_repo/.claude/settings.local.json"
 assert_file_exists ".claude/agents-shared/ created"    "$test_repo/.claude/agents-shared"
 assert_file_exists ".claude/agents/_example-agent.md"  "$test_repo/.claude/agents/_example-agent.md"
-assert_contains "init message mentions tasks.conf"     "tasks.conf" "$output"
+assert_contains "init message mentions bullet input"   "supervisor" "$output"
 assert_contains "model discovery runs during scaffold" "Available models" "$output"
 
 # No workspace-kit-owned files should exist
@@ -204,25 +208,17 @@ claude_md_content="$(cat "$test_repo/.claude/CLAUDE.md")"
 assert_contains "CLAUDE.md has supervisor fenced block" "BEGIN claude-supervisor" "$claude_md_content"
 assert_contains "CLAUDE.md fenced block closed"         "END claude-supervisor"   "$claude_md_content"
 
-# Verify tasks.conf is added to .gitignore
+# Verify .gitignore entries (1.0: no tasks.conf, yes agents-shared)
 assert_file_exists ".gitignore created" "$test_repo/.gitignore"
-if grep -qx "tasks.conf" "$test_repo/.gitignore" 2>/dev/null; then
-  pass ".gitignore contains tasks.conf"
+if ! grep -qx "tasks.conf" "$test_repo/.gitignore" 2>/dev/null; then
+  pass ".gitignore does not contain tasks.conf (removed in 1.0)"
 else
-  fail ".gitignore missing tasks.conf entry"
+  fail ".gitignore should not contain tasks.conf in 1.0"
 fi
 if grep -q ".claude/agents-shared/" "$test_repo/.gitignore" 2>/dev/null; then
   pass ".gitignore contains .claude/agents-shared/"
 else
   fail ".gitignore missing .claude/agents-shared/ entry"
-fi
-
-# Verify tasks.conf has content
-tasks_size=$(wc -c < "$test_repo/tasks.conf")
-if (( tasks_size > 100 )); then
-  pass "tasks.conf has content (${tasks_size} bytes)"
-else
-  fail "tasks.conf seems empty (${tasks_size} bytes)"
 fi
 
 rm -rf "$mock_bin_init"
@@ -283,12 +279,12 @@ fi
 custom_content="$(cat "$test_repo/.claude/CLAUDE.md")"
 assert_eq ".claude/CLAUDE.md preserved across re-runs" "custom content" "$custom_content"
 
-# Verify .gitignore was not duplicated on re-run (tasks.conf entry added in first run)
-gitignore_count=$(grep -cx "tasks.conf" "$test_repo/.gitignore")
-if (( gitignore_count == 1 )); then
-  pass ".gitignore tasks.conf entry not duplicated on re-run"
+# Verify .gitignore agents-shared entry not duplicated on re-run
+gitignore_count=$(grep -c "agents-shared" "$test_repo/.gitignore" || true)
+if (( gitignore_count <= 2 )); then
+  pass ".gitignore agents-shared entry not duplicated on re-run"
 else
-  fail ".gitignore has ${gitignore_count} 'tasks.conf' entries (expected 1)"
+  fail ".gitignore has ${gitignore_count} 'agents-shared' entries (expected ≤2)"
 fi
 
 # Test: scaffolding appends to existing .gitignore
@@ -306,10 +302,10 @@ mock_bin_gi="/tmp/mock-npx-gi-$$"
 _make_mock_npx_fail "$mock_bin_gi"
 echo "n" | PATH="$mock_bin_gi:$PATH" bash "$PROJECT_ROOT/bin/supervisor.sh" "$test_repo_gi" &>/dev/null || true
 
-if grep -q "node_modules/" "$test_repo_gi/.gitignore" && grep -qx "tasks.conf" "$test_repo_gi/.gitignore"; then
-  pass ".gitignore appended to (preserves existing entries)"
+if grep -q "node_modules/" "$test_repo_gi/.gitignore" && grep -q "agents-shared" "$test_repo_gi/.gitignore"; then
+  pass ".gitignore appended to (preserves existing entries, adds agents-shared)"
 else
-  fail ".gitignore existing content lost or tasks.conf not added"
+  fail ".gitignore existing content lost or agents-shared not added"
 fi
 rm -rf "$test_repo_gi" "$mock_bin_gi"
 
@@ -589,6 +585,65 @@ else
   fail "startup script not created for no-key test"
 fi
 rm -rf "$spawn_nokey_repo" "$spawn_nokey_repo-nokey-branch" "/tmp/mock-bin-nokey-$$"
+
+# ─── Test: supervisor subcommand routing (Phase 4) ───────────────────────────
+
+echo ""
+echo "supervisor subcommand routing"
+echo "─────────────────────────────"
+
+# doctor on a valid repo should exit 0
+doctor_repo="/tmp/cs-doctor-$$"
+mkdir -p "$doctor_repo/.claude"
+git -C "$doctor_repo" init -b main &>/dev/null
+git -C "$doctor_repo" config user.email "ci@test.local"
+git -C "$doctor_repo" config user.name "CI Test"
+touch "$doctor_repo/README.md"
+git -C "$doctor_repo" add . &>/dev/null
+git -C "$doctor_repo" commit -m "init" &>/dev/null
+
+doctor_out="$(bash "$PROJECT_ROOT/bin/supervisor.sh" doctor "$doctor_repo" 2>&1)" && doctor_ec=$? || doctor_ec=$?
+assert_exit_code "supervisor doctor exits 0 on valid repo" "0" "$doctor_ec"
+assert_contains "doctor output mentions git" "Git repository" "$doctor_out"
+
+rm -rf "$doctor_repo"
+
+# uninstall --dry-run on a valid repo should exit 0 with no changes
+uninstall_repo="/tmp/cs-uninstall-$$"
+mkdir -p "$uninstall_repo/.claude"
+git -C "$uninstall_repo" init -b main &>/dev/null
+git -C "$uninstall_repo" config user.email "ci@test.local"
+git -C "$uninstall_repo" config user.name "CI Test"
+touch "$uninstall_repo/.claude/settings.local.json"
+touch "$uninstall_repo/README.md"
+git -C "$uninstall_repo" add . &>/dev/null
+git -C "$uninstall_repo" commit -m "init" &>/dev/null
+
+uninstall_out="$(bash "$PROJECT_ROOT/bin/supervisor.sh" uninstall --dry-run "$uninstall_repo" 2>&1)" && uninstall_ec=$? || uninstall_ec=$?
+assert_exit_code "supervisor uninstall --dry-run exits 0" "0" "$uninstall_ec"
+assert_contains "dry-run output mentions settings.local.json" "settings.local.json" "$uninstall_out"
+# File must still exist after dry run
+assert_file_exists "settings.local.json untouched after dry-run" "$uninstall_repo/.claude/settings.local.json"
+
+rm -rf "$uninstall_repo"
+
+# migrate subcommand detected (no 0.2.x repo needed — just test routing)
+# migrate on a 1.0 repo (has settings.local.json) should say "already on 1.0 layout"
+migrate_repo="/tmp/cs-migrate-$$"
+mkdir -p "$migrate_repo/.claude"
+git -C "$migrate_repo" init -b main &>/dev/null
+git -C "$migrate_repo" config user.email "ci@test.local"
+git -C "$migrate_repo" config user.name "CI Test"
+touch "$migrate_repo/.claude/settings.local.json"
+touch "$migrate_repo/README.md"
+git -C "$migrate_repo" add . &>/dev/null
+git -C "$migrate_repo" commit -m "init" &>/dev/null
+
+migrate_out="$(bash "$PROJECT_ROOT/bin/supervisor.sh" migrate "$migrate_repo" 2>&1)" && migrate_ec=$? || migrate_ec=$?
+assert_exit_code "supervisor migrate exits 0 on already-migrated repo" "0" "$migrate_ec"
+assert_contains "migrate detects 1.0 layout" "already on the 1.0 layout" "$migrate_out"
+
+rm -rf "$migrate_repo"
 
 # ─── Test: supervisor rejects non-git directory ──────────────────────────────
 
@@ -1032,7 +1087,11 @@ echo ""
 echo "template files"
 echo "──────────────"
 
-assert_file_exists "templates/tasks.conf exists"                   "$PROJECT_ROOT/templates/tasks.conf"
+if [[ ! -f "$PROJECT_ROOT/templates/tasks.conf" ]]; then
+  pass "templates/tasks.conf removed (bullet-list input replaces it in 1.0)"
+else
+  fail "templates/tasks.conf should have been removed"
+fi
 assert_file_exists "templates/CLAUDE.md exists"                    "$PROJECT_ROOT/templates/CLAUDE.md"
 assert_file_exists "templates/.claude/settings.local.json exists"  "$PROJECT_ROOT/templates/.claude/settings.local.json"
 assert_file_exists "templates/.claude/agents/_example-agent.md"    "$PROJECT_ROOT/templates/.claude/agents/_example-agent.md"
@@ -1062,11 +1121,6 @@ fi
 assert_file_exists "templates/.claude/skills/share/SKILL.md exists"  "$PROJECT_ROOT/templates/.claude/skills/share/SKILL.md"
 assert_file_exists "templates/.claude/skills/peers/SKILL.md exists"  "$PROJECT_ROOT/templates/.claude/skills/peers/SKILL.md"
 
-# Verify tasks.conf uses INI block format
-tasks_conf_content="$(cat "$PROJECT_ROOT/templates/tasks.conf")"
-assert_contains "tasks.conf has [task] headers" "[task]" "$tasks_conf_content"
-assert_contains "tasks.conf has prompt field" "prompt =" "$tasks_conf_content"
-
 # Verify settings.local.json contains PermissionRequest and Stop hooks
 settings_local_content="$(cat "$PROJECT_ROOT/templates/.claude/settings.local.json")"
 assert_contains "settings.local.json has PermissionRequest hook" "PermissionRequest"  "$settings_local_content"
@@ -1091,6 +1145,104 @@ if [[ -x "$PROJECT_ROOT/bin/update.sh" ]]; then
 else
   fail "update.sh is not executable"
 fi
+
+# ─── Test: bullet-list parser (Phase 4) ──────────────────────────────────────
+
+echo ""
+echo "bullet-list parser"
+echo "──────────────────"
+
+# Source the parser
+# shellcheck disable=SC1091
+source "$PROJECT_ROOT/lib/parse-bullets.sh"
+
+# Test: plain bullet → prompt only
+result="$(parse_bullets "- implement the OAuth2 login flow")"
+assert_eq "plain bullet prompt" "TASK|implement the OAuth2 login flow||||" "$result"
+
+# Test: bullet with model tag
+result="$(parse_bullets "- fix login bug [model: claude-sonnet-4-5]")"
+assert_eq "model tag parsed" "TASK|fix login bug||claude-sonnet-4-5||" "$result"
+
+# Test: bullet with plan shorthand
+result="$(parse_bullets "- review the codebase [plan]")"
+assert_eq "plan shorthand" "TASK|review the codebase|||plan|" "$result"
+
+# Test: bullet with mode: plan
+result="$(parse_bullets "- review the codebase [mode: plan]")"
+assert_eq "mode: plan tag" "TASK|review the codebase|||plan|" "$result"
+
+# Test: bullet with branch tag
+result="$(parse_bullets "- implement OAuth [branch: feat-oauth]")"
+assert_eq "branch tag parsed" "TASK|implement OAuth|feat-oauth|||" "$result"
+
+# Test: bullet with depends tag
+result="$(parse_bullets "- write tests [depends: feat-oauth]")"
+assert_eq "depends tag parsed" "TASK|write tests||||feat-oauth" "$result"
+
+# Test: multiple tags (comma-separated)
+result="$(parse_bullets "- fix session bug [model: claude-haiku-4-5, branch: fix-session]")"
+assert_eq "multiple tags" "TASK|fix session bug|fix-session|claude-haiku-4-5||" "$result"
+
+# Test: plan + model combined
+result="$(parse_bullets "- review arch [plan, model: claude-opus-4-7]")"
+assert_eq "plan + model combined" "TASK|review arch||claude-opus-4-7|plan|" "$result"
+
+# Test: all tags at once
+result="$(parse_bullets "- implement feature [model: claude-sonnet-4-5, branch: feat, mode: normal, depends: prereq]")"
+assert_eq "all tags" "TASK|implement feature|feat|claude-sonnet-4-5|normal|prereq" "$result"
+
+# Test: comment lines ignored
+result="$(parse_bullets "# this is a comment
+- actual task")"
+assert_eq "comment line ignored" "TASK|actual task||||" "$result"
+
+# Test: sub-bullets ignored (2+ space indent)
+result="$(parse_bullets "- main task
+  - sub task ignored")"
+assert_eq "sub-bullets ignored" "TASK|main task||||" "$result"
+
+# Test: non-bullet prose lines ignored
+result="$(parse_bullets "This is a header
+- the task
+And some prose")"
+assert_eq "prose lines ignored" "TASK|the task||||" "$result"
+
+# Test: multiple bullets → multiple TASK lines
+result="$(parse_bullets "- task one
+- task two [plan]")"
+expected="TASK|task one||||
+TASK|task two|||plan|"
+assert_eq "multiple bullets" "$expected" "$result"
+
+# Test: empty input → no output
+result="$(parse_bullets "# just comments
+")"
+assert_eq "empty input no output" "" "$result"
+
+# Test: * and + bullet markers also work
+result="$(parse_bullets "* star bullet
++ plus bullet")"
+expected="TASK|star bullet||||
+TASK|plus bullet||||"
+assert_eq "star and plus markers work" "$expected" "$result"
+
+# Test: supervisor pre-1.0 detection (tasks.conf without settings.local.json)
+p10_repo="/tmp/cs-p10-detect-$$"
+mkdir -p "$p10_repo"
+git -C "$p10_repo" init -b main &>/dev/null
+git -C "$p10_repo" config user.email "ci@test.local"
+git -C "$p10_repo" config user.name "CI Test"
+touch "$p10_repo/tasks.conf"  # old-style layout
+touch "$p10_repo/README.md"
+git -C "$p10_repo" add . &>/dev/null
+git -C "$p10_repo" commit -m "init" &>/dev/null
+
+p10_output="$(bash "$PROJECT_ROOT/bin/supervisor.sh" "$p10_repo" 2>&1)" && p10_ec=$? || p10_ec=$?
+assert_exit_code "pre-1.0 detection exits non-zero" "1" "$p10_ec"
+assert_contains "pre-1.0 detection mentions migrate" "supervisor migrate" "$p10_output"
+
+rm -rf "$p10_repo"
 
 # ─── Test: Stop hook and shared notes (Phase 3) ──────────────────────────────
 
@@ -1262,6 +1414,27 @@ if [[ -x "$PROJECT_ROOT/bin/on-stop.sh" ]]; then
   pass "on-stop.sh is executable"
 else
   fail "on-stop.sh is not executable"
+fi
+
+for _script in migrate.sh uninstall.sh doctor.sh; do
+  assert_file_exists "bin/$_script exists" "$PROJECT_ROOT/bin/$_script"
+  if [[ -x "$PROJECT_ROOT/bin/$_script" ]]; then
+    pass "bin/$_script is executable"
+  else
+    fail "bin/$_script is not executable"
+  fi
+  if bash -n "$PROJECT_ROOT/bin/$_script" 2>/dev/null; then
+    pass "bin/$_script has valid bash syntax"
+  else
+    fail "bin/$_script has bash syntax errors"
+  fi
+done
+
+assert_file_exists "lib/parse-bullets.sh exists" "$PROJECT_ROOT/lib/parse-bullets.sh"
+if bash -n "$PROJECT_ROOT/lib/parse-bullets.sh" 2>/dev/null; then
+  pass "lib/parse-bullets.sh has valid bash syntax"
+else
+  fail "lib/parse-bullets.sh has bash syntax errors"
 fi
 
 # ─── Test: collect-learnings.sh ──────────────────────────────────────────────

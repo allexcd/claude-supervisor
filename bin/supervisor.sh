@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # bin/supervisor.sh — Orchestrates parallel Claude Code agents
 #
-# Usage: supervisor.sh [--reset] [repo_path]
-#   repo_path defaults to $PWD
+# Usage: supervisor [--reset] [repo_path]
+#         supervisor run "task1" "task2" ...
+#         supervisor last | list | attach <n>
+#         supervisor watch | update | on-stop | migrate | uninstall | doctor
 #   --reset   re-prompt for billing mode (Pro vs API)
-#
-# First run:  auto-init scaffolds tasks.conf + .claude/ from templates → exits
-# Normal run: reads tasks.conf, spawns one agent per task line
 
 set -euo pipefail
 
@@ -36,27 +35,43 @@ for arg in "$@"; do
 done
 export RESET_BILLING
 
-# ── Subcommands ──────────────────────────────────────────────────────────────
-# Dispatch subcommands before the main flow.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib/parse-bullets.sh"
+
+# ── Subcommand dispatch ───────────────────────────────────────────────────────
+
+_INPUT_MODE=""   # argv | last | stdin | editor
+_ARGV_TASKS=()   # populated for "run" subcommand
 
 if [[ ${#args[@]} -gt 0 ]]; then
   case "${args[0]}" in
-    watch)
-      # supervisor watch [repo_path]
-      exec "$SCRIPT_DIR/watch.sh" "${args[1]:-$PWD}"
+    watch)     exec "$SCRIPT_DIR/watch.sh" "${args[1]:-$PWD}" ;;
+    update)    exec "$SCRIPT_DIR/update.sh" "${args[1]:-$PWD}" ;;
+    on-stop)   exec "$SCRIPT_DIR/on-stop.sh" ;;
+    migrate)   exec "$SCRIPT_DIR/migrate.sh" "${args[1]:-$PWD}" ;;
+    uninstall) exec "$SCRIPT_DIR/uninstall.sh" "${args[@]:1}" ;;
+    doctor)    exec "$SCRIPT_DIR/doctor.sh" "${args[1]:-$PWD}" ;;
+    run)
+      _INPUT_MODE="argv"
+      _ARGV_TASKS=("${args[@]:1}")
+      args=()
       ;;
-    update)
-      # supervisor update [repo_path]
-      exec "$SCRIPT_DIR/update.sh" "${args[1]:-$PWD}"
-      ;;
-    on-stop)
-      # supervisor on-stop (called by Claude Code Stop hook)
-      exec "$SCRIPT_DIR/on-stop.sh"
+    last|list|attach)
+      _INPUT_MODE="${args[0]}"
+      args=("${args[@]:1}")
       ;;
   esac
 fi
 
-repo_path="${args[0]:-$PWD}"
+# ── Repo path ────────────────────────────────────────────────────────────────
+
+if [[ "$_INPUT_MODE" == "argv" || "$_INPUT_MODE" == "list" ]]; then
+  repo_path="$PWD"
+elif [[ "$_INPUT_MODE" == "last" || "$_INPUT_MODE" == "attach" ]]; then
+  repo_path="${args[0]:-$PWD}"
+else
+  repo_path="${args[0]:-$PWD}"
+fi
 
 # Resolve to absolute path
 if [[ -d "$repo_path" ]]; then
@@ -112,24 +127,23 @@ new pitfall bullets from all active worktrees into the main copy.
   fi
 }
 
+# ── Pre-1.0 state detection ───────────────────────────────────────────────────
+# If tasks.conf exists but settings.local.json doesn't, this is a 0.2.x layout.
+if [[ -f "$repo_path/tasks.conf" && ! -f "$repo_path/.claude/settings.local.json" ]]; then
+  echo ""
+  warn "This project uses the 0.2.x layout (tasks.conf without settings.local.json)."
+  printf "\n  Run ${CYAN}supervisor migrate${RESET} to upgrade to 1.0, then run supervisor again.\n\n"
+  exit 1
+fi
+
+# ── Auto-init (first run) ────────────────────────────────────────────────────
 if [[ ! -f "$repo_path/.claude/settings.local.json" ]]; then
   echo ""
   info "Project not yet set up. Initialising..."
   echo ""
 
-  # ── tasks.conf (kept for backward compat until v1.0 bullet-list input) ─────
-  if [[ ! -f "$repo_path/tasks.conf" ]]; then
-    cp "$TEMPLATES_DIR/tasks.conf" "$repo_path/tasks.conf"
-    ok "Created tasks.conf"
-  fi
-
-  # ── .gitignore: tasks.conf entry (idempotent) ─────────────────────────────
   gitignore="$repo_path/.gitignore"
   [[ -f "$gitignore" ]] || touch "$gitignore"
-  if ! grep -qx "tasks.conf" "$gitignore" 2>/dev/null; then
-    printf '\n# Claude Supervisor — personal task config (not shared)\ntasks.conf\n' >> "$gitignore"
-    ok "Added tasks.conf to .gitignore"
-  fi
 
   # ── Bootstrap workspace via workspace-kit (or bare fallback) ───────────────
   if [[ -d "$repo_path/.claude" ]]; then
@@ -179,7 +193,7 @@ if [[ ! -f "$repo_path/.claude/settings.local.json" ]]; then
   # ── Supervisor overlay: settings.local.json ────────────────────────────────
   mkdir -p "$repo_path/.claude"
   cp "$TEMPLATES_DIR/.claude/settings.local.json" "$repo_path/.claude/settings.local.json"
-  ok "Created .claude/settings.local.json  (PermissionRequest → Opus hook)"
+  ok "Created .claude/settings.local.json  (PermissionRequest → Opus + Stop hooks)"
 
   # ── Shared peer notes directory ────────────────────────────────────────────
   mkdir -p "$repo_path/.claude/agents-shared"
@@ -198,10 +212,9 @@ if [[ ! -f "$repo_path/.claude/settings.local.json" ]]; then
   show_available_models "$repo_path"
 
   echo ""
-  printf "${BOLD}Next:${RESET} edit ${CYAN}tasks.conf${RESET} with your tasks, then run supervisor again.\n"
-  printf "      ${CYAN}%s/tasks.conf${RESET}\n" "$repo_path"
+  printf "${BOLD}Next:${RESET} run ${CYAN}supervisor${RESET} again to enter your tasks.\n"
+  printf "      (or pipe tasks:  echo '- implement OAuth' | ${CYAN}supervisor${RESET})\n"
   echo ""
-  info "Leave the model field blank in tasks.conf to choose at run time."
   info "Pro subscribers authenticate via Claude — no API key needed."
   echo ""
   exit 0
@@ -274,23 +287,181 @@ if [[ "$CLAUDE_SUPERVISOR_ANTHROPIC_BILLING_MODE" == "api" ]]; then
   _check_hook_model
 fi
 
-# Step 5: Parse tasks.conf (INI-style blocks) and spawn agents
-tasks_file="$repo_path/tasks.conf"
-total_tasks=$(grep -c '^\[task\]' "$tasks_file" 2>/dev/null || echo "0")
+# ─── list / attach subcommands (need billing + models loaded first) ──────────
 
-step "4/4 — Spawning agents  (${total_tasks} task block(s) found in tasks.conf)"
+if [[ "$_INPUT_MODE" == "list" ]]; then
+  state_file="$repo_path/.claude/supervisor-agents.jsonl"
+  if [[ ! -f "$state_file" || ! -s "$state_file" ]]; then
+    info "No active agents found. Run supervisor to spawn agents."
+  else
+    echo ""
+    printf "  ${BOLD}%-20s %-12s %-6s  %s${RESET}\n" "Branch" "Model" "Mode" "Spawned at"
+    printf "  %-20s %-12s %-6s  %s\n" "────────────────────" "────────────" "──────" "───────────────────"
+    while IFS= read -r entry; do
+      local_b="" local_m="" local_mo="" local_ts=""
+      if command -v jq &>/dev/null; then
+        local_b="$(echo "$entry"  | jq -r '.branch    // "?"' 2>/dev/null)"
+        local_m="$(echo "$entry"  | jq -r '.model     // "?"' 2>/dev/null)"
+        local_mo="$(echo "$entry" | jq -r '.mode      // "?"' 2>/dev/null)"
+        local_ts="$(echo "$entry" | jq -r '.spawned_at // "?"' 2>/dev/null)"
+      else
+        local_b="$(echo "$entry"  | grep -o '"branch":"[^"]*"'   | sed 's/"branch":"//;s/"//')"
+        local_m="$(echo "$entry"  | grep -o '"model":"[^"]*"'    | sed 's/"model":"//;s/"//')"
+        local_mo="$(echo "$entry" | grep -o '"mode":"[^"]*"'     | sed 's/"mode":"//;s/"//')"
+        local_ts="$(echo "$entry" | grep -o '"spawned_at":"[^"]*"' | sed 's/"spawned_at":"//;s/"//')"
+      fi
+      printf "  %-20s %-12s %-6s  %s\n" \
+        "${local_b:0:20}" "${local_m/claude-/}" "${local_mo:0:6}" "$local_ts"
+    done < "$state_file"
+    echo ""
+    printf "  Attach: ${CYAN}supervisor attach <branch>${RESET} or ${CYAN}tmux attach -t %s-agents${RESET}\n" \
+      "$(basename "$repo_path")"
+  fi
+  echo ""
+  exit 0
+fi
 
-# ── Compute session and repo identifiers early (needed for watch window) ─────
+if [[ "$_INPUT_MODE" == "attach" ]]; then
+  local_target="${args[0]:-}"
+  local_session="$(basename "$repo_path")-agents"
+  if [[ -z "$local_target" ]]; then
+    # Attach to session (window 0 = watch dashboard)
+    exec tmux attach -t "$local_session"
+  else
+    exec tmux attach -t "${local_session}:${local_target}"
+  fi
+fi
+
+# ─── Step 4/4 — Read task input and spawn agents ─────────────────────────────
+
+step "4/4 — Reading tasks"
+
+# ── Determine input source ────────────────────────────────────────────────────
+
+_TASK_INPUT=""
+
+if [[ "$_INPUT_MODE" == "argv" ]]; then
+  # supervisor run "task1" "task2" — each arg is a task bullet
+  for _t in "${_ARGV_TASKS[@]}"; do
+    [[ "$_t" =~ ^[[:space:]]*[-*+] ]] || _t="- $_t"
+    _TASK_INPUT+="$_t"$'\n'
+  done
+
+elif [[ "$_INPUT_MODE" == "last" ]]; then
+  _last_file="$repo_path/.claude/supervisor-last.md"
+  if [[ ! -f "$_last_file" ]]; then
+    die "No previous session found at $_last_file. Run supervisor with tasks first."
+  fi
+  _TASK_INPUT="$(cat "$_last_file")"
+  info "Reusing last session tasks from supervisor-last.md"
+
+elif [[ ! -t 0 ]]; then
+  # Stdin is a pipe/redirect
+  _TASK_INPUT="$(cat)"
+
+else
+  # Interactive editor mode
+  _stub_file="$(mktemp /tmp/supervisor-tasks-XXXX.md)"
+  cat > "$_stub_file" <<'STUB'
+# Describe your tasks — one bullet per agent.
+#
+# Format:   - <task description> [tags]
+# Tags:     model: sonnet|haiku|opus   mode: plan   branch: my-branch   depends: other-branch
+# Examples:
+#   - review the codebase and write an implementation plan [plan, model: opus]
+#   - implement the OAuth login flow [model: sonnet, branch: feat-oauth]
+#   - write tests for OAuth [depends: feat-oauth]
+#
+# Lines starting with # are ignored.  Sub-bullets are ignored.
+# Save and close to continue.  Leave empty to cancel.
+
+-
+STUB
+  _editor="${VISUAL:-${EDITOR:-vi}}"
+  "$_editor" "$_stub_file" </dev/tty >/dev/tty
+  _TASK_INPUT="$(cat "$_stub_file")"
+  rm -f "$_stub_file"
+fi
+
+# ── Parse bullets ─────────────────────────────────────────────────────────────
+
+declare -a _task_prompts=()
+declare -a _task_branches=()
+declare -a _task_models=()
+declare -a _task_modes=()
+declare -a _task_depends=()
+
+while IFS='|' read -r _rec _prompt _branch _model _mode _depends; do
+  [[ "$_rec" != "TASK" ]] && continue
+  _task_prompts+=("$_prompt")
+  _task_branches+=("$_branch")
+  _task_models+=("$_model")
+  _task_modes+=("$_mode")
+  _task_depends+=("$_depends")
+done < <(parse_bullets "$_TASK_INPUT")
+
+total_tasks="${#_task_prompts[@]}"
+
+if [[ "$total_tasks" -eq 0 ]]; then
+  info "No tasks found — nothing to spawn."
+  echo ""
+  exit 0
+fi
+
+# ── Phase 1: resolve branches + pick missing models interactively ─────────────
+
+echo ""
+printf "${BOLD}Tasks to spawn:${RESET}\n"
+
+for _i in "${!_task_prompts[@]}"; do
+  _p="${_task_prompts[$_i]}"
+  _b="${_task_branches[$_i]}"
+  _m="${_task_models[$_i]}"
+  _mo="${_task_modes[$_i]:-normal}"
+  _dep="${_task_depends[$_i]}"
+
+  [[ -z "$_b" ]] && { _b="$(slugify "$_p")"; _task_branches[$_i]="$_b"; }
+  [[ -z "$_mo" ]] && { _mo="normal"; _task_modes[$_i]="normal"; }
+
+  echo ""
+  printf "  ${BOLD}%d.${RESET} %s\n" "$((_i+1))" "$_p"
+  printf "     branch: ${CYAN}%s${RESET}  mode: %s" "$_b" "$_mo"
+  [[ -n "$_dep" ]] && printf "  depends: ${YELLOW}%s${RESET}" "$_dep"
+  printf "\n"
+
+  if [[ -z "$_m" ]]; then
+    printf "     model: (choose below)\n"
+    _m="$(pick_model "$_p" "$_b")"
+    _task_models[$_i]="$_m"
+  fi
+  printf "     model: %s\n" "$_m"
+done
+
+echo ""
+printf "Spawn %d agent(s)? [Y/n] " "$total_tasks"
+read -r _confirm </dev/tty || _confirm="y"
+[[ -z "$_confirm" ]] && _confirm="y"
+if [[ ! "$_confirm" =~ ^[Yy] ]]; then
+  echo "Cancelled."
+  exit 0
+fi
+
+# ── Save for 'supervisor last' ────────────────────────────────────────────────
+
+printf '%s\n' "$_TASK_INPUT" > "$repo_path/.claude/supervisor-last.md"
+
+# ── Session setup ─────────────────────────────────────────────────────────────
+
+step "4/4 — Spawning agents  (${total_tasks} task(s))"
+
 session="$(basename "$repo_path")-agents"
 repo_parent="$(dirname "$repo_path")"
 repo_name="$(basename "$repo_path")"
 
-# ── Reset agent state file (watch dashboard reads this) ───────────────────
 state_file="$repo_path/.claude/supervisor-agents.jsonl"
 mkdir -p "$(dirname "$state_file")"
-: > "$state_file"  # truncate
+: > "$state_file"
 
-# ── Pre-create tmux session with watch window as window 0 ─────────────────
 if ! tmux has-session -t "$session" 2>/dev/null; then
   tmux new-session -d -s "$session" -n "watch" -c "$repo_path" \
     "bash \"$SCRIPT_DIR/watch.sh\" \"$repo_path\"" 2>/dev/null || true
@@ -299,78 +470,35 @@ fi
 agent_index=0
 agent_count=0
 
-# Arrays to store resolved agent details for the summary
 declare -a _spawned_branches=()
 declare -a _spawned_models=()
 declare -a _spawned_modes=()
 declare -a _spawned_prompts=()
 
-# ─── INI block parser ────────────────────────────────────────────────────────
-# Format:
-#   [task]
-#   prompt = description of the task
-#   branch = optional-branch-name
-#   model  = optional-model-id
-#   mode   = normal | plan
-#
-# Empty lines and # comments are ignored. A [task] header starts a new block.
-# When the next [task] header (or EOF) is reached, the previous block is spawned.
-
 _spawn_current_task() {
   local branch="$1" model="$2" mode="$3" prompt="$4"
   local task_num=$((agent_count + 1))
 
-  # Prompt must be non-empty
-  if [[ -z "$prompt" ]]; then
-    warn "Skipping task block (empty prompt)"
-    return
-  fi
+  [[ -z "$prompt" ]] && { warn "Skipping task (empty prompt)"; return; }
+  [[ -z "$mode" || ( "$mode" != "normal" && "$mode" != "plan" ) ]] && mode="normal"
 
-  # Auto-generate branch from task if empty
-  local branch_note=""
-  if [[ -z "$branch" ]]; then
-    branch="$(slugify "$prompt")"
-    branch_note="  (auto-generated)"
-  fi
-
-  # Default mode to normal
-  if [[ -z "$mode" ]]; then
-    mode="normal"
-  fi
-
-  # Validate mode
-  if [[ "$mode" != "normal" && "$mode" != "plan" ]]; then
-    warn "Invalid mode '$mode' for task '$prompt' — defaulting to normal"
-    mode="normal"
-  fi
-
-  # Print task summary box
   echo ""
-  printf "  ${BOLD}── Task %d of %s ───────────────────────────────────────────${RESET}\n" \
+  printf "  ${BOLD}── Task %d of %d ──────────────────────────────────────────${RESET}\n" \
     "$task_num" "$total_tasks"
   printf "  ${BOLD}Prompt${RESET} : %s\n" "$prompt"
-  printf "  ${BOLD}Branch${RESET} : %s%s\n" "$branch" "$branch_note"
+  printf "  ${BOLD}Branch${RESET} : %s\n" "$branch"
   printf "  ${BOLD}Mode${RESET}   : %s\n" "$mode"
-
-  # Pick model if not specified
-  if [[ -z "$model" ]]; then
-    printf "  ${BOLD}Model${RESET}  : (choose below)\n"
-    model="$(pick_model "$prompt" "$branch")"
-  fi
   printf "  ${BOLD}Model${RESET}  : %s\n" "$model"
   echo ""
 
-  # Store resolved details for summary
   _spawned_branches+=("$branch")
   _spawned_models+=("$model")
   _spawned_modes+=("$mode")
   _spawned_prompts+=("$prompt")
 
-  # Spawn the agent
   local worktree_path="${repo_parent}/${repo_name}-${branch}"
   "$SCRIPT_DIR/spawn-agent.sh" "$repo_path" "$branch" "$model" "$mode" "$agent_index" "$prompt"
 
-  # Append agent metadata to state file (read by supervisor watch)
   local ts
   ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   printf '{"branch":"%s","model":"%s","mode":"%s","worktree":"%s","spawned_at":"%s"}\n' \
@@ -380,92 +508,80 @@ _spawn_current_task() {
   agent_count=$((agent_count + 1))
 }
 
-in_block=false
-t_branch="" t_model="" t_mode="" t_prompt=""
+# ── Phase 2+3: Spawn agents (immediate or dependency-gated) ──────────────────
 
-while IFS= read -r line || [[ -n "$line" ]]; do
-  # Strip leading/trailing whitespace
-  line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+for _i in "${!_task_prompts[@]}"; do
+  _p="${_task_prompts[$_i]}"
+  _b="${_task_branches[$_i]}"
+  _m="${_task_models[$_i]}"
+  _mo="${_task_modes[$_i]:-normal}"
+  _dep="${_task_depends[$_i]}"
 
-  # Skip empty lines and comments
-  [[ -z "$line" ]] && continue
-  [[ "$line" =~ ^# ]] && continue
+  if [[ -n "$_dep" ]]; then
+    # Dependency staging: spawn in background once dep's Stop hook fires
+    (
+      _sum_file="$repo_path/.claude/supervisor-session-summary.jsonl"
+      printf "  ${YELLOW}⏳${RESET} Waiting for '%s' to complete before starting '%s'...\n" "$_dep" "$_b"
+      while ! grep -q '"branch":"'"$_dep"'"' "$_sum_file" 2>/dev/null; do
+        sleep 15
+      done
 
-  # [task] header — spawn previous block, start new one
-  if [[ "$line" =~ ^\[task\]$ ]]; then
-    if $in_block; then
-      _spawn_current_task "$t_branch" "$t_model" "$t_mode" "$t_prompt"
-    fi
-    in_block=true
-    t_branch="" t_model="" t_mode="" t_prompt=""
-    continue
+      # Augment prompt with dep diff summary
+      _dep_diff="$(git -C "$repo_path" diff HEAD..."$_dep" --stat 2>/dev/null | head -10 || true)"
+      _augmented="$_p"
+      if [[ -n "$_dep_diff" ]]; then
+        _augmented="$_p
+
+Dependency '$_dep' has completed. Summary of changes:
+$_dep_diff"
+      fi
+
+      _spawn_current_task "$_b" "$_m" "$_mo" "$_augmented"
+    ) &
+    disown
+    info "Task '$_b' staged — will start after '$_dep' completes"
+    agent_count=$((agent_count + 1))
+  else
+    _spawn_current_task "$_b" "$_m" "$_mo" "$_p"
   fi
-
-  # key = value pairs inside a block
-  if $in_block && [[ "$line" =~ ^([a-z]+)[[:space:]]*=[[:space:]]*(.*) ]]; then
-    local_key="${BASH_REMATCH[1]}"
-    local_val="${BASH_REMATCH[2]}"
-    case "$local_key" in
-      prompt) t_prompt="$local_val" ;;
-      branch) t_branch="$local_val" ;;
-      model)  t_model="$local_val" ;;
-      mode)   t_mode="$local_val" ;;
-      *)      warn "Unknown key '$local_key' in task block — ignoring" ;;
-    esac
-  fi
-
-done < "$tasks_file"
-
-# Spawn the last block
-if $in_block; then
-  _spawn_current_task "$t_branch" "$t_model" "$t_mode" "$t_prompt"
-fi
+done
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 
 echo ""
 printf "${BOLD}═══════════════════════════════════════════════════════════════${RESET}\n"
-printf "  ${GREEN}✓${RESET} Spawned ${GREEN}${agent_count}${RESET} agent(s) in tmux session: ${CYAN}${session}${RESET}\n"
+printf "  ${GREEN}✓${RESET} Spawned ${GREEN}%d${RESET} agent(s) in tmux session: ${CYAN}%s${RESET}\n" \
+  "$agent_count" "$session"
 printf "${BOLD}═══════════════════════════════════════════════════════════════${RESET}\n"
 echo ""
 
-# Show per-agent instructions
-printf "  ${BOLD}Option A — Attach to tmux (all agents + live watch dashboard):${RESET}\n"
+printf "  ${BOLD}Attach to tmux (live watch dashboard + all agents):${RESET}\n"
 echo ""
-printf "    ${CYAN}tmux attach -t ${session}${RESET}\n"
+printf "    ${CYAN}tmux attach -t %s${RESET}\n" "$session"
 echo ""
-printf "    ${BOLD}Window 0${RESET} — live status dashboard (supervisor watch)\n"
-printf "    ${BOLD}Windows 1+${RESET} — individual agents\n"
-printf "    Navigate: ${BOLD}Ctrl+b n${RESET} (next)  ${BOLD}Ctrl+b p${RESET} (prev)  ${BOLD}Ctrl+b w${RESET} (list)\n"
-printf "    Detach:   ${BOLD}Ctrl+b d${RESET} (agents keep running in background)\n"
+printf "    Window 0 — watch dashboard  |  Windows 1+ — agents\n"
+printf "    Navigate: Ctrl+b n/p  |  Detach: Ctrl+b d\n"
 echo ""
 
-printf "  ${BOLD}Option B — Open each agent in its own terminal tab:${RESET}\n"
-echo ""
-printf "    Open a new tab for each worktree below and run the command:\n"
+printf "  ${BOLD}Or open each agent directly:${RESET}\n"
 echo ""
 
-for i in "${!_spawned_branches[@]}"; do
-  local_branch="${_spawned_branches[$i]}"
-  local_model="${_spawned_models[$i]}"
-  local_mode="${_spawned_modes[$i]}"
-  local_prompt="${_spawned_prompts[$i]}"
-  local_wt="${repo_parent}/${repo_name}-${local_branch}"
-  local_prompt_short="${local_prompt:0:60}"
+for _i in "${!_spawned_branches[@]}"; do
+  _lb="${_spawned_branches[$_i]}"
+  _lm="${_spawned_models[$_i]}"
+  _lmo="${_spawned_modes[$_i]}"
+  _lp="${_spawned_prompts[$_i]}"
+  _lwt="${repo_parent}/${repo_name}-${_lb}"
 
-  local_cmd="cd ${local_wt} && claude"
-  [[ -n "$local_model" ]] && local_cmd+=" --model ${local_model}"
-  [[ "$local_mode" == "plan" ]] && local_cmd+=" --permission-mode plan"
+  _lcmd="cd ${_lwt} && claude"
+  [[ -n "$_lm" ]] && _lcmd+=" --model ${_lm}"
+  [[ "$_lmo" == "plan" ]] && _lcmd+=" --permission-mode plan"
 
-  printf "    ${BOLD}Tab %d${RESET} — %s\n" "$((i + 1))" "$local_prompt_short"
-  printf "    ${CYAN}%s${RESET}\n\n" "$local_cmd"
+  printf "    ${BOLD}%d.${RESET} %s\n" "$((_i + 1))" "${_lp:0:60}"
+  printf "    ${CYAN}%s${RESET}\n\n" "$_lcmd"
 done
 
-printf "    Then paste the task prompt into Claude when it loads.\n"
-echo ""
-printf "  ${BOLD}Live dashboard (in a separate terminal):${RESET}\n"
-echo ""
-printf "    ${CYAN}supervisor watch %s${RESET}\n" "$repo_path"
+printf "  ${BOLD}Live dashboard:${RESET}  ${CYAN}supervisor watch %s${RESET}\n" "$repo_path"
 echo ""
 printf "${BOLD}═══════════════════════════════════════════════════════════════${RESET}\n"
 echo ""
