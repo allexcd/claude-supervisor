@@ -32,24 +32,23 @@
 - Use subagents for narrow, isolated tasks — delegate to keep your main context clean
 - Run tests before marking any task as done
 - After a correction, add it to Known Pitfalls above
-- Use `/model` to switch to a cheaper model once complex planning is complete
-- Use `/agents` to see available subagents for this project
 
-## Syncing Learnings Back
+<!-- BEGIN claude-supervisor (do not edit by hand) -->
+## Worktree-sync Notes
 
-This file lives in your worktree — a copy of the main project's `.claude/CLAUDE.md`.
-Updates you make here are **not** automatically reflected in the main repo.
+This project uses `claude-supervisor` to run parallel agents across isolated git worktrees.
 
-**Why not?** Multiple agents run in parallel across isolated worktrees. If they all
-wrote to the same main CLAUDE.md simultaneously, you'd get race conditions and
-corruption. The owner also needs a review gate — not every agent-discovered pitfall
-is correct or worth propagating to all future agents.
+**Race-condition guidance:**
+- Each agent works in its own worktree — never write to another agent's branch
+- After adding to Known Pitfalls, commit this file:
+  `git add .claude/CLAUDE.md && git commit -m "docs: update CLAUDE.md"`
 
-**To preserve learnings across worktrees:**
-1. After adding to Known Pitfalls, commit this file with your other changes:
-   ```
-   git add .claude/CLAUDE.md && git commit -m "docs: update CLAUDE.md with new pitfall"
-   ```
-2. The project owner runs `bin/collect-learnings.sh [--yes] <repo_path>` to diff all
-   active worktrees' CLAUDE.md files against main and patch the main copy with new lines.
-   Use `--yes` to auto-approve all merges (useful in CI or scripts).
+**Sharing learnings across worktrees:**
+The project owner runs `collect-learnings.sh [--yes] <repo_path>` to merge
+new pitfall bullets from all active worktrees into the main copy.
+
+**Shared peer notes:**
+- Read peer updates: `cat .claude/agents-shared/*.md`
+- Use `/share <message>` to append a timestamped note for peers
+- Use `/peers` to view all peer notes
+<!-- END claude-supervisor -->

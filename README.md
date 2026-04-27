@@ -6,13 +6,50 @@
 [![License](https://img.shields.io/github/license/allexcd/claude-supervisor)](LICENSE)
 [![node](https://img.shields.io/node/v/claude-supervisor)](https://nodejs.org)
 
-Spin up parallel [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents in isolated git worktrees — each with its own task, model, and mode — from a single config file.
+Spin up **parallel Claude Code agents** in isolated git worktrees — each with its own task, model, and mode — by describing your work in plain prompts.
 
 ```bash
-bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/your-project
+supervisor                                          # interactive prompt — type tasks one by one
+supervisor run "implement OAuth" "write tests [depends: implement-oauth]"
+echo "- fix the login bug [model: haiku]" | supervisor
 ```
 
-On first run it scaffolds a config file. On every run after that it reads the config and spawns one agent per `[task]` block: branch created, worktree created, Claude launched in a tmux window. At the end it prints ready-to-copy commands so you can also open each agent in its own terminal tab.
+On first run it scaffolds `.claude/` with a safety hook and peer-notes directory. On every run after that it prompts for tasks, confirms, and spawns one agent per task: branch created, worktree created, Claude launched in a tmux window. A live watch dashboard opens in window 0. When an agent finishes, `collect-learnings` runs automatically.
+
+---
+
+## How this compares to native Claude Code
+
+claude-supervisor is the **batch-orchestration layer on top of native Claude Code primitives** — using session JSONL and worktrees underneath, not competing with them.
+
+**Similarities — Claude Code does these natively:**
+- Worktree + tmux + Claude in one command — `claude -w <branch> --tmux`
+- Headless invocation with structured streaming — `claude -p --output-format stream-json`
+- Subagents, skills, hooks, session resume/fork — all first-class in Claude Code
+
+**What supervisor adds:**
+- **Batch task input** — describe N tasks, get N parallel agents. Native `claude -w` is one-at-a-time; experimental Agent Teams uses a single-session split-pane model. Neither has the "describe a list, walk away" workflow.
+- **Per-task model differentiation** — task A on Haiku, task B on Opus, task C in plan mode, all in one invocation.
+- **Workflow lifecycle** — dependency staging (`[depends: …]`), automatic `collect-learnings` on agent finish, shared peer notes between parallel agents, migrate / uninstall tooling.
+- **Opinionated patterns** — plan-then-execute, `PermissionRequest → Opus` safety routing, workspace-kit integration.
+
+**When to use supervisor vs. raw `claude -w`:** if you have a single task or are already inside Claude Code, use `claude -w` directly. Use supervisor when you have a batch of parallel work and want the list-and-walk-away workflow.
+
+---
+
+## Pairs with claude-workspace-kit
+
+[claude-workspace-kit](https://github.com/allexcd/claude-workspace-kit) scaffolds `.claude/` with a curated set of agents, skills, commands, rules, and output styles. claude-supervisor and workspace-kit are designed to work together without colliding:
+
+| Concern | Owner | Files |
+|---|---|---|
+| Agents, skills, commands, rules, hooks | workspace-kit | tracked in `.cwk.lock` |
+| PermissionRequest → Opus safety hook | supervisor | `.claude/settings.local.json` |
+| Stop hook → auto-collect-learnings | supervisor | `.claude/settings.local.json` |
+| Shared peer notes directory | supervisor | `.claude/agents-shared/` (gitignored) |
+| Worktree-sync notes in CLAUDE.md | supervisor | fenced `<!-- BEGIN claude-supervisor -->` block |
+
+On first run supervisor asks if you want to bootstrap workspace-kit. If you accept, workspace-kit runs `init` first, then supervisor writes its own overlay (`settings.local.json`) on top. If you decline, supervisor writes a minimal fallback. Either way the two tools never touch each other's files.
 
 ---
 
@@ -20,969 +57,445 @@ On first run it scaffolds a config file. On every run after that it reads the co
 
 | Tool | Install |
 |---|---|
-| **git** | `xcode-select --install` (macOS) · or `brew install git` for a newer version |
+| **git** | `xcode-select --install` (macOS) · or `brew install git` |
 | **tmux** | `brew install tmux` |
 | **Node.js / npm** | [nvm](https://github.com/nvm-sh/nvm): `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/HEAD/install.sh \| bash` then `nvm install --lts` |
 | **Claude Code CLI** | `npm install -g @anthropic-ai/claude-code` |
 
-> The supervisor checks for all of these on every run. If anything is missing it will list what's needed and offer to auto-install.
+The supervisor checks for all of these on every run and offers to auto-install missing tools.
 
-To check for and apply updates via Homebrew:
-
-```bash
-brew outdated git        # check if git has an update
-brew update && brew upgrade git  # update git
-brew upgrade             # update all outdated formulae at once
-```
-
-**Billing:** The supervisor supports two billing modes:
+**Billing:**
 
 | Mode | Who | API key needed? |
 |---|---|---|
-| **Pro / Max / Team** | Claude subscription users | No — authenticate via Claude's OAuth login |
-| **API key** | Anthropic Console users | Yes — `ANTHROPIC_API_KEY` required |
+| **Pro / Max / Team** | Claude subscription users | No — OAuth login |
+| **API key** | Anthropic Console users | Yes — `ANTHROPIC_API_KEY` |
 
-The supervisor remembers your billing mode choice and saves it to your project's `.env` file. On subsequent runs, it uses the saved preference without re-prompting. If it finds `ANTHROPIC_API_KEY` in the environment or in your project's `.env`, it auto-selects API mode.
-
-To change your billing mode later, use the `--reset` flag:
-
-```bash
-bash bin/supervisor.sh --reset /path/to/your-project
-```
-
-API-key users can export the key beforehand (`export ANTHROPIC_API_KEY=sk-ant-...`) or enter it at the prompt — it's saved to `.env` so you only enter it once.
+Your billing mode is saved to `.env` on first run. Use `--reset` to re-prompt.
 
 ---
 
-## Install via npm
+## Install
 
-The supervisor is published to npm. If you already have Node.js/npm installed (required for Claude Code CLI), this is the fastest way to get started.
-
-### Option A — Global install (personal use, run from any directory)
+### Global (personal use, run from any directory)
 
 ```bash
 npm install -g claude-supervisor
-supervisor.sh ~/my-project
+supervisor              # run in current project directory
+supervisor ~/my-project
 ```
 
-### Option B — Local devDependency (teams, CI, version-locked)
-
-**Step 1.** Add `claude-supervisor` to your devDependencies:
+### Local devDependency (teams, version-locked)
 
 ```bash
 npm install --save-dev claude-supervisor
 ```
 
-**Step 2.** Add these npm scripts to your `package.json`:
+Add to `package.json`:
 
 ```json
 {
   "scripts": {
-    "agents":         "supervisor.sh",
-    "agents:reset":   "supervisor.sh --reset",
+    "agents": "supervisor",
+    "agents:watch": "supervisor watch",
     "agents:collect": "collect-learnings.sh --yes"
   }
 }
 ```
 
-> **Important:** Both steps are required. Installing the package makes the binaries available, but the npm scripts above must be added manually to your `package.json` — they are not created automatically.
-
-**Step 3.** Run:
+### Clone and run directly
 
 ```bash
-npm run agents       # first run → scaffolds tasks.conf + .claude/ → exits
-# edit tasks.conf
-npm run agents       # spawns agents
-```
-
-npm symlinks the bin entries into `node_modules/.bin/` and adds that directory to PATH during `npm run`. The shell scripts resolve their own location via `BASH_SOURCE[0]` which follows symlinks correctly, so `../lib/utils.sh` and `../templates/` resolve to the right place inside `node_modules/claude-supervisor/`.
-
-### Option C — Clone and run directly (no install required)
-
-```bash
-git clone <this-repo-url> claude-supervisor
+git clone https://github.com/allexcd/claude-supervisor
 bash claude-supervisor/bin/supervisor.sh ~/my-project
 ```
 
 ---
 
-## Quick Start
+## Quick start
 
-### 1. Clone this repo
-
-```bash
-git clone <this-repo-url> claude-supervisor
-cd claude-supervisor
-```
-
-### 2. First run — scaffold config into your project
+### 1. First run — scaffold the project
 
 ```bash
-bash bin/supervisor.sh /path/to/your-project
+cd ~/my-project
+supervisor
 ```
 
-This creates:
+supervisor detects `.claude/settings.local.json` is absent, scaffolds:
 
 ```
-your-project/
-  tasks.conf                 # Define your tasks here (gitignored — personal)
-  .gitignore                 # Updated to exclude tasks.conf
-  .claude/
-    CLAUDE.md                # Project memory — shared by all agents
-    settings.json            # PermissionRequest → Opus hook
-    agents/
-      reviewer.md            # Code review subagent
-      debugger.md            # Debugging and root cause analysis subagent
-      test-writer.md         # Test writing subagent
-      _example-agent.md      # Blank template — copy to create your own
-    commands/
-      techdebt.md            # /techdebt — find and fix technical debt
-      explain.md             # /explain — explain code with the why
-      diagram.md             # /diagram — draw ASCII architecture diagrams
-      learn.md               # /learn — Socratic learning session
+.claude/
+  settings.local.json     # PermissionRequest → Opus + Stop → collect-learnings hooks
+  agents-shared/          # Shared peer notes (gitignored)
+  CLAUDE.md               # Project memory (created if workspace-kit declined)
+  agents/
+    _example-agent.md     # Blank template — copy to create your own
+.gitignore                # .env and .claude/agents-shared/ added
 ```
 
-`tasks.conf` is automatically added to `.gitignore`.
+If you accept the workspace-kit prompt, `.claude/agents/`, `.claude/skills/`, etc. are also created.
 
-The supervisor then displays common model IDs so you know what to put in `tasks.conf`. If an API key is available (environment variable or `.env` file), it also fetches the full list from the Anthropic API.
+### 2. Enter your tasks
 
-What to commit and what to ignore:
+After scaffolding, supervisor prompts you for tasks in the same run:
 
-| File | Git | Why |
-|---|---|---|
-| `.claude/CLAUDE.md` | **Commit** | Shared project memory — conventions, pitfalls, context for all agents |
-| `.claude/settings.json` | **Commit** | PermissionRequest hook config — same safety gating for everyone |
-| `.claude/agents/` | **Commit** | Subagents are project tools — reviewer, debugger, test-writer |
-| `.claude/commands/` | **Commit** | Slash commands belong to the project — `/techdebt`, `/explain`, etc. |
-| `tasks.conf` | **Ignore** | Personal and ephemeral — your current batch of work. Two people running different tasks would conflict. |
-| `.env` | **Ignore** | Contains your API key (API-key billing only) — automatically gitignored when created. |
+```
+  Optional tags: [model: sonnet|haiku|opus]  [plan]  [branch: name]  [depends: branch]
 
-The supervisor then exits with instructions.
+  What would you like to work on?
+  > review the codebase and write an implementation plan [plan, model: opus]
 
-> **Tip:** If you skip the model list during first run, that's fine — you can omit the `model` field in tasks.conf and the supervisor will show an interactive menu on the next run.
+  Add another task? [y/N] y
 
-### 3. Edit tasks.conf
+  Task 2:
+  > implement the OAuth login flow [model: sonnet, branch: feat-oauth]
 
-Open `your-project/tasks.conf` and define your tasks. Each `[task]` block defines one agent:
+  Add another task? [y/N] y
 
-```ini
-[task]
-prompt = description of the task
-branch = optional-branch-name
-model  = optional-model-id
-mode   = normal | plan
+  Task 3:
+  > write tests for OAuth [depends: feat-oauth]
+
+  Add another task? [y/N] n
 ```
 
-Only `prompt` is required. Omit any other field to use its default:
-
-| Field | Omitted means |
-|---|---|
-| `branch` | Auto-generated from prompt text (e.g. `fix login bug` → `fix-login-bug`) |
-| `model` | You'll be prompted with a live model menu for that task |
-| `mode` | Defaults to `normal` |
-
-**Examples:**
-
-```ini
-# Fully specified
-[task]
-branch = feature-auth
-model  = claude-sonnet-4-5-20250929
-mode   = normal
-prompt = implement the OAuth2 login flow
-
-# Only a prompt — branch auto-generated, model prompted, mode defaults to normal
-[task]
-prompt = refactor the database layer to use connection pooling
-
-# Plan mode — only prompt and mode needed
-[task]
-mode   = plan
-prompt = review the codebase and write an implementation plan
-
-# Explicit branch and model, mode defaults to normal
-[task]
-branch = fix-login-bug
-model  = claude-haiku-4-5-20251001
-prompt = fix the login session timeout bug
-```
-
-Blank lines and `#` comments are ignored. A `[task]` header starts a new block.
-
-### 4. Run again — agents spawn
+Or skip the prompt entirely:
 
 ```bash
-bash bin/supervisor.sh /path/to/your-project
+# Pipe tasks directly
+echo "- fix the login bug [model: haiku]" | supervisor
+
+# Pass tasks as arguments
+supervisor run "implement OAuth" "write tests [depends: implement-oauth]"
+
+# Respawn last session
+supervisor last
 ```
 
-The supervisor will:
-1. Check dependencies
-2. Use saved billing mode preference, or prompt if first run (Pro subscription or API key)
-3. Resolve API key (API-key users only — prompts if not found, saves to `.env`)
-4. Fetch available models (live from API for API-key users, static list for Pro users)
-5. For each task block, prompt you to pick a model (if not specified in config)
-6. Create a git branch + worktree per task
-7. Open a tmux window per agent, launch Claude Code
-8. Auto-paste the task prompt into Claude after it loads
-9. Print instructions for accessing each agent
+### 3. Confirm and watch
 
-### 5. Access your agents
+supervisor shows a summary, asks for confirmation, then spawns agents. A live watch dashboard opens in tmux window 0:
 
-After spawning, the supervisor prints two options:
+```
+Claude Supervisor — Live Agent Dashboard   12:34:01
+  Repo: ~/my-project
 
-**Option A — tmux (all agents in one place):**
+  Agent                Model    Mode    Status                 Last activity
+  ──────────────────── ──────── ──────  ────────────────────── ─────────────
+  feat-oauth           sonnet   normal  ⏵ tool: Edit            2s ago
+  review-plan          opus     plan    ⏵ thinking              8s ago
+  write-tests          haiku    normal  ⏸ idle (waiting for feat-oauth)
+```
+
+### 4. Attach and navigate
 
 ```bash
-tmux attach -t your-project-agents
+tmux attach -t my-project-agents
 ```
 
 | Key | Action |
 |---|---|
-| `Ctrl+b n` | Next agent |
-| `Ctrl+b p` | Previous agent |
-| `Ctrl+b w` | List all agents — pick one |
-| `Ctrl+b 0` / `1` / `2` | Jump to agent by number |
-| `Ctrl+b d` | Detach (agents keep running in background) |
+| `Ctrl+b n` / `p` | Next / previous agent |
+| `Ctrl+b w` | List all windows — pick one |
+| `Ctrl+b 0` | Jump to watch dashboard |
+| `Ctrl+b d` | Detach (agents keep running) |
 
-> **Note:** Press `Ctrl+b`, release **both** keys, then press the second key. It's two separate keystrokes, not a three-key combo.
+### 5. After agents finish
 
-**Option B — separate terminal tabs (simpler navigation):**
+When an agent's session ends, the Stop hook fires automatically:
+- Runs `collect-learnings.sh --yes` for that worktree
+- Appends a completion record to `.claude/supervisor-session-summary.jsonl`
 
-The supervisor prints a ready-to-copy `cd ... && claude ...` command for each agent. Open a new tab in your terminal (`Cmd+T`), paste the command, and you're in. Use normal tab switching (`Cmd+1`, `Cmd+2`, etc.).
-
-Example output:
-
-```
-═══════════════════════════════════════════════════════════════
-  ✓ Spawned 2 agent(s) in tmux session: your-project-agents
-═══════════════════════════════════════════════════════════════
-
-  Option A — Attach to tmux (all agents in one place):
-
-    tmux attach -t your-project-agents
-
-  Option B — Open each agent in its own terminal tab:
-
-    Tab 1 — implement the OAuth2 login flow
-    cd /path/to/your-project-feature-auth && claude --model claude-sonnet-4-5-20250929
-
-    Tab 2 — fix the login session timeout bug
-    cd /path/to/your-project-fix-login-bug && claude --model claude-haiku-4-5-20251001
-
-    Then paste the task prompt into Claude when it loads.
-
-═══════════════════════════════════════════════════════════════
-```
-
-> **IMPORTANT — First time using Claude Code CLI?** You'll see Claude's setup wizard asking "Select login method". **Press `1`** if you have a Claude Pro/Max/Team subscription, or **press `2`** if you're using an Anthropic API key. This setup is one-time per machine.
-
-**Detach and reattach tmux anytime:**
+Then review diffs and open PRs:
 
 ```bash
-# Detach (go back to your shell, agents keep running)
-Ctrl+b d
+git -C ~/my-project diff main..feat-oauth
+gh pr create --head feat-oauth --base main --title "OAuth login"
 
-# Reattach later
-tmux attach -t your-project-agents
-
-# List all sessions
-tmux ls
+# Or clean up everything at once
+supervisor uninstall --everything
 ```
-
-> **Tip:** The commands above work because you `cd`'d into the claude-supervisor directory. For daily use from anywhere, either use the full path — `bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/project` — or set up shell shortcuts (next section).
-
-**Usage:**
-
-```bash
-supervisor.sh [--reset] [repo_path]
-```
-
-- `--reset`: Re-prompt for billing mode (clears saved preference)
-- `repo_path`: Project directory (defaults to current directory)
 
 ---
 
-## Shell Shortcuts (Optional)
+## Task input
 
-If you use the supervisor frequently, you can set up shell shortcuts to avoid typing the full path every time.
+### Bullet grammar
 
-### Quick setup
-
-Run from the claude-supervisor directory:
-
-```bash
-bash bin/setup-shortcuts.sh
+```
+- <task description> [tag, tag, ...]
 ```
 
-It will:
-- Auto-detect the installation path
-- Back up your `~/.zshrc` to `~/.zshrc.backup-YYYYMMDD-HHMMSS`
-- Let you choose between adding to **PATH** or creating **aliases** (both modify `~/.zshrc`)
-- Check if already installed (won't duplicate)
-- Reload your shell configuration automatically (if running in zsh)
+Tags go inside `[…]` at the end of the line, comma-separated:
 
-### PATH setup (recommended)
+| Tag | Effect |
+|---|---|
+| `model: sonnet` | Use this model for the agent (`sonnet`, `haiku`, `opus`, or a full model ID) |
+| `branch: my-branch` | Use this branch name (default: auto-generated from prompt) |
+| `plan` or `mode: plan` | Launch in plan mode (read-only until you approve) |
+| `depends: branch-name` | Wait for that branch's agent to finish before spawning |
 
-Adds `claude-supervisor/bin` to your PATH. Then run:
+**Examples:**
 
-```bash
-supervisor.sh              # run in current directory
-supervisor.sh ~/my-project
-collect-learnings.sh --yes
-spawn-agent.sh ~/my-project fix-bug claude-sonnet-4-5-20250929 normal 0 "fix the login bug"
+```
+# Plain — branch auto-generated, model prompted
+- refactor the database layer
+
+# Fully specified
+- implement OAuth login [model: claude-sonnet-4-5, branch: feat-oauth, mode: normal]
+
+# Plan mode + Opus for complex review
+- review the architecture as a staff engineer [plan, model: opus]
+
+# Dependency — spawns only after feat-oauth agent finishes
+- write tests for OAuth [depends: feat-oauth, model: haiku]
 ```
 
-### Alias setup
+**Rules:**
+- Lines starting with `#` are ignored
+- Indented sub-bullets (2+ spaces) are ignored — paste from meeting notes freely
+- Non-bullet lines (prose, headers) are ignored
+- The last `[…]` group on a line is parsed as tags; everything before it is the prompt
 
-Creates short aliases. Then run:
+### Input modes
 
-```bash
-supervisor              # run in current directory  
-supervisor ~/my-project
-collect-learnings --yes
-spawn-agent ~/my-project fix-bug claude-sonnet-4-5-20250929 normal 0 "fix the login bug"
-```
-
-### Manual setup
-
-If you prefer to edit `~/.zshrc` yourself:
-
-**PATH:**
-```bash
-export PATH="/path/to/claude-supervisor/bin:$PATH"
-```
-
-**Aliases:**
-```bash
-alias supervisor='bash /path/to/claude-supervisor/bin/supervisor.sh'
-alias collect-learnings='bash /path/to/claude-supervisor/bin/collect-learnings.sh'
-alias spawn-agent='bash /path/to/claude-supervisor/bin/spawn-agent.sh'
-```
-
-Then reload: `source ~/.zshrc`
+| Invocation | Mode |
+|---|---|
+| `supervisor` (TTY, no args) | Interactive prompt — type tasks one by one |
+| `supervisor < tasks.md` | Reads from stdin |
+| `echo "- task" \| supervisor` | Reads from stdin |
+| `supervisor run "task1" "task2"` | Reads from argv |
+| `supervisor last` | Reuses the previous session's task list |
 
 ---
 
-## Example Walkthrough
+## Live watch dashboard
 
-Assuming you have a project and want to work on two things in parallel, here's exactly what to do.
-
-> Commands below use full paths so they work from any directory. If you set up shell shortcuts, replace `bash /path/to/claude-supervisor/bin/supervisor.sh` with `supervisor`.
-
-**Your tasks:**
-1. Add an "Ungroup All" feature — removes all tab groups at once
-2. Rename tab titles using AI — infer a meaningful name from tab content
-
-**Step 1:** Run the supervisor on your project for the first time to scaffold the config:
+`supervisor watch` tails each agent's Claude Code session log and renders a live status table, refreshing every 3 seconds:
 
 ```bash
-bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/your-project
+supervisor watch              # current directory
+supervisor watch ~/my-project
 ```
 
-**Step 2:** Open `your-project/tasks.conf`, delete the example blocks, and add your two tasks:
+The watch window is pre-created as tmux window 0 every time supervisor spawns agents. Agents idle for more than 5 minutes are flagged with `← stuck?`.
 
-```ini
-[task]
-prompt = Add "Ungroup All" functionality — a button/command that removes all tab groups at once
+Configure with environment variables:
 
-[task]
-prompt = Rename tab titles using AI — infer a meaningful name from tab content and update the title
-```
+| Variable | Default | Effect |
+|---|---|---|
+| `CS_WATCH_INTERVAL` | `3` | Refresh interval in seconds |
+| `CS_STUCK_MINUTES` | `5` | Minutes of idle before "stuck?" flag |
 
-Branch names will be auto-generated from the prompts, and you'll pick a model interactively for each.
+---
 
-**Step 3:** Run the supervisor again:
+## Shared peer notes
+
+Parallel agents working in separate worktrees can communicate via an append-only shared directory:
 
 ```bash
-bash /path/to/claude-supervisor/bin/supervisor.sh /path/to/your-project
+# Inside an agent session (Claude skill)
+/share I've settled on email+profile scope, refresh tokens enabled
+/peers       # read recent updates from all other agents
 ```
 
-You'll be prompted to pick a model for each task. Pick Haiku for straightforward tasks, Sonnet or Opus for complex ones. Two worktrees and two tmux windows open automatically.
+The `/share` skill appends a timestamped line to `.claude/agents-shared/<branch>.md`. The `/peers` skill reads all files in that directory. Each agent writes only its own file — no race conditions.
 
-**Step 4:** Access your agents. The supervisor prints two options:
+---
 
-**Option A — tmux:** Attach to the tmux session and navigate between agents:
+## Dependency staging
+
+Add `[depends: branch-name]` to a task to stage it behind another:
+
+```
+- implement the OAuth login flow [model: sonnet, branch: feat-oauth]
+- write tests for OAuth [depends: feat-oauth, model: haiku]
+```
+
+supervisor spawns the `feat-oauth` agent immediately. The `write-tests` agent is held until the `feat-oauth` agent's Stop hook fires, then spawns automatically — with the dependency's diff summary prepended to its prompt as context.
+
+---
+
+## Subcommands
 
 ```bash
-tmux attach -t your-project-agents
+supervisor                        # enter tasks (interactive / stdin / argv)
+supervisor run "t1" "t2" ...      # argv mode
+supervisor last                   # respawn previous session
+supervisor list                   # show active agents from state file
+supervisor attach [branch]        # tmux attach shortcut
+supervisor watch [repo]           # live status dashboard
+supervisor update [repo]          # refresh workspace-kit + supervisor overlay
+supervisor doctor [repo]          # diagnose project state
+supervisor migrate [repo]         # upgrade 0.2.x → 1.0 layout
+supervisor uninstall [--dry-run] [--with-workspace] [--everything] [repo]
 ```
 
-**Option B — separate tabs:** Copy the `cd ... && claude ...` command for each agent into a new terminal tab (`Cmd+T`).
+**`supervisor doctor`** — prints current state: git repo, settings.local.json, hooks, agents-shared, workspace-kit, active worktrees, tmux session, and dependencies.
 
-You'll see each agent in its own color-coded tmux window with a banner showing the task.
+**`supervisor migrate`** — guided upgrade from 0.2.x: backs up `.claude/`, moves hook config to `settings.local.json`, archives `tasks.conf`, optionally runs workspace-kit init.
 
-> **First time using Claude Code CLI?** You'll see a setup wizard asking "Select login method:". **Press `1` and Enter** if you have a Claude Pro/Max/Team subscription, or **Press `2` and Enter** if you're using an Anthropic API key (Console billing). This is one-time setup per machine. After setup, Claude will show its prompt.
+**`supervisor uninstall`** — removes only supervisor's files by default. `--with-workspace` also runs workspace-kit uninstall. `--everything` also kills the tmux session and removes worktrees.
 
-When Claude loads:
-- **Copy the task** from the banner at the top and paste it to Claude to begin
-- Switch between agents with `Ctrl+b` then `n`/`p` (tmux) or `Cmd+1`/`Cmd+2` (tabs)
-- Type **`/model`** to switch models mid-session (e.g. start with Opus for planning, switch to Haiku for implementation)
-
-Each agent works independently on its worktree.
-
-**Step 5:** After agents finish, collect learnings, open PRs, and clean up:
-
-```bash
-# Collect any CLAUDE.md updates agents made, before removing worktrees
-bash /path/to/claude-supervisor/bin/collect-learnings.sh your-project
-
-# Review what each agent did
-git -C your-project diff main..add-ungroup-all-functionality
-git -C your-project diff main..rename-tab-titles-using-ai
-
-# Open PRs (requires gh CLI)
-gh pr create --head add-ungroup-all-functionality --base main \
-  --title "Add Ungroup All" --body "Implemented by Claude agent"
-gh pr create --head rename-tab-titles-using-ai --base main \
-  --title "Rename tab titles with AI" --body "Implemented by Claude agent"
-
-# Once PRs are approved and merged, clean up worktrees locally
-git worktree remove ../your-project-add-ungroup-all-functionality
-git worktree remove ../your-project-rename-tab-titles-using-ai
-
-# Kill the tmux session (stops all agents)
-tmux kill-session -t your-project-agents
-```
-
-> **Tip:** If you need to stop agents early or start over, see the "Stopping agents and cleaning up worktrees" section below.
+**`supervisor update`** — re-runs `npx claude-workspace-kit@latest update` (if workspace-kit is present) and refreshes the supervisor overlay.
 
 ---
 
 ## Modes
 
-The `mode` field in `tasks.conf` controls how the agent behaves:
-
-| Mode | Flag | What it does |
-|---|---|---|
-| `normal` | _(default)_ | Agent reads and writes freely. Full access to tools. Use for implementation tasks. |
-| `plan` | `--permission-mode plan` | Agent can read and analyze but won't modify any files until you explicitly approve each action. Use for planning, code review, and risk assessment. Plan-mode windows are always **yellow** in tmux. |
-
-**When to use `plan`:**
-- You want to understand the scope before anything is written
-- You want a second agent to review a plan before workers execute it
-- The task is large or risky and you want a read-only audit first
-
-**When to use `normal`:**
-- The task is well-defined and scoped
-- You trust the agent to proceed without a planning step
-- You're running a small fix or an isolated feature
-
-**Typical pattern for complex work:**
-
-```ini
-# tasks.conf
-
-# Phase 1 — read-only planning
-[task]
-mode   = plan
-prompt = review the codebase and write a detailed implementation plan for OAuth2 login
-
-[task]
-mode   = plan
-prompt = review the above plan as a staff engineer and flag risks or missing steps
-
-# Phase 2 — execution (add these after approving the plan)
-[task]
-branch = feature-auth
-model  = claude-sonnet-4-5-20250929
-prompt = implement the OAuth2 login flow per the approved plan
-
-[task]
-branch = write-tests
-model  = claude-haiku-4-5-20251001
-prompt = write tests for the new auth module
-```
-
----
-
-## Workflow
-
-### Recommended pattern for complex features
-
-**Phase 1 — Plan (read-only agents)**
-
-```ini
-[task]
-mode   = plan
-prompt = review the codebase and write a detailed implementation plan for the feature
-
-[task]
-mode   = plan
-prompt = review the above plan as a staff engineer and flag risks or missing steps
-```
-
-Plan-mode agents use `--permission-mode plan` — they can read and analyze but won't modify files until you approve. Their tmux windows are always **yellow** so you can spot them at a glance.
-
-**Phase 2 — Execute (worker agents)**
-
-Once you've reviewed and approved the plan, update `tasks.conf` with workers:
-
-```ini
-[task]
-branch = feature-auth
-model  = claude-sonnet-4-5-20250929
-prompt = implement the OAuth2 login flow per the approved plan
-
-[task]
-branch = write-tests
-model  = claude-haiku-4-5-20251001
-prompt = write tests for the new auth module
-```
-
-Run the supervisor again to spawn the workers.
-
-**Phase 3 — Re-plan if needed**
-
-If a worker goes sideways, spawn a new plan-mode agent to reassess before continuing.
-
-### Inside each agent session
-
-Each agent tmux window shows a banner with the task details:
-
-```
-╔══════════════════════════════════════════════════════╗
-║  CLAUDE AGENT                                        ║
-╠══════════════════════════════════════════════════════╣
-║  Task  : fix the login session timeout bug
-║  Branch: fix-login-bug
-║  Model : claude-haiku-4-5-20251001
-║  Mode  : normal
-╠══════════════════════════════════════════════════════╣
-║  Hints:                                              ║
-║  • /model      — switch model mid-session            ║
-║  • /agents     — view available subagents            ║
-║  • /statusline — enable context + git branch bar     ║
-║  • Update CLAUDE.md after corrections                ║
-║  • Explain the WHY behind every change               ║
-╚══════════════════════════════════════════════════════╝
-
-▸ Starting Claude...
-
-💡 Task will be shown above - you can copy/paste it to Claude when ready
-```
-
-**First time using Claude Code CLI on this machine?**
-
-Before the banner appears, you'll see Claude's setup wizard:
-
-```
-Select login method:
- › 1. Claude account with subscription · Pro, Max, Team, or Enterprise
-   2. Anthropic Console account · API usage billing
-   3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI
-```
-
-**Press `1` and Enter** if you have a Claude Pro, Max, Team, or Enterprise subscription. **Press `2` and Enter** if you're using an Anthropic API key (Console billing). This is one-time setup per machine. After completing setup, the banner will appear and Claude will be ready.
-
-**Start the agent:** Copy the task text from the banner and paste it to Claude when ready. The agent will begin working on it immediately.
-
-Useful commands inside an agent:
-- **`/model`** — switch to a cheaper model once complex planning is done
-- **`/agents`** — list available subagents (from `.claude/agents/`)
-- **`/statusline`** — enable the context usage + git branch bar (one-time global config)
-
-### After agents finish
-
-Each agent works on its own branch. Open a PR per branch, review it, merge it. Worktrees are created at `../your-project-<branch>/` alongside your project directory.
-
-```bash
-# 1. Collect agent learnings back into the main CLAUDE.md (before removing worktrees!)
-bash /path/to/claude-supervisor/bin/collect-learnings.sh /path/to/your-project
-
-# 2. Commit the updated CLAUDE.md
-git -C /path/to/your-project add .claude/CLAUDE.md
-git -C /path/to/your-project commit -m "docs: merge agent learnings"
-
-# 3. List all active worktrees and branches
-git worktree list
-
-# 4. Open a PR for a branch (requires gh CLI)
-gh pr create --head feature-auth --base main 
-  --title "Feature: OAuth2 login" --body "Implemented by Claude agent"
-
-# 5. After the PR is merged, remove the worktree
-git worktree remove ../your-project-feature-auth
-```
-
-> **Important:** Run `collect-learnings.sh` _before_ `git worktree remove`. Once a worktree is gone, its CLAUDE.md updates are gone with it.
-
-### Stopping agents and cleaning up worktrees
-
-**To stop all agents and kill the tmux session:**
-
-```bash
-# Kill the entire tmux session (stops all agents immediately)
-tmux kill-session -t your-project-agents
-```
-
-**To list and remove worktrees:**
-
-```bash
-# 1. List all active worktrees
-git worktree list
-
-# 2. Remove a specific worktree
-git worktree remove ../your-project-feature-auth
-
-# 3. Force remove (if there are uncommitted changes)
-git worktree remove --force ../your-project-feature-auth
-
-# 4. Remove all agent worktrees for a project
-git worktree list | grep "your-project-" | awk '{print $1}' | xargs -I {} git worktree remove --force {}
-```
-
-**Common scenarios:**
-
-| Scenario | Commands |
+| Mode | What it does |
 |---|---|
-| **Agents stuck/hung** | `tmux kill-session -t project-agents` |
-| **Start fresh** | Kill session → remove worktrees → edit `tasks.conf` → run supervisor again |
-| **Agent finished, want to keep work** | Don't remove worktree yet — open PR from that branch first |
-| **Agent failed, want to retry** | Remove worktree → remove branch → run supervisor again (it will recreate) |
-| **Force closed terminal** | Agents still running — use `tmux attach` to reconnect, or `tmux kill-session` to stop |
-| **Killed session, want to resume** | Just run the supervisor again with the same `tasks.conf` — it detects existing worktrees and reuses them, no work is lost |
+| `normal` _(default)_ | Agent reads and writes freely. Use for implementation tasks. |
+| `plan` | Agent can read but won't modify files until you approve each action. Plan-mode tmux windows are always **yellow**. |
 
-**To remove branches after removing worktrees:**
+**Pattern — plan then execute:**
 
-```bash
-# List all branches
-git branch -a
+```
+# Step 1: spawn planner
+- review the codebase and write a detailed implementation plan [plan, model: opus]
 
-# Delete a local branch (after merging)
-git branch -d feature-auth
-
-# Force delete a local branch (without merging)
-git branch -D feature-auth
+# After approving the plan, spawn workers
+- implement the feature per the plan [model: sonnet, branch: feat-impl]
+- write tests for the feature [depends: feat-impl, model: haiku]
 ```
 
 ---
 
-## Model Selection
+## Project memory (CLAUDE.md)
 
-There are two separate model choices:
-
-**1. Agent model** — you pick this per task. It does the actual work.
-
-- **Pro users:** the supervisor shows a static list of common models. You can also type `/model` inside any agent session to switch models on the fly.
-- **API-key users:** models are fetched live from the Anthropic API.
-- For any task with an empty `model` field, the supervisor presents an interactive menu. You can also hardcode a model ID in `tasks.conf`.
-
-**2. PermissionRequest hook model** — hardcoded to `claude-opus-4-6` in `.claude/settings.json`. This only fires when an agent tries a risky action (e.g., deleting a file). Opus evaluates for a few seconds and returns allow/deny. It does not run continuously.
-
-```
-User picks Haiku for agent  →  agent does 95% of the work cheaply
-         ↓
-Agent tries to delete a file  →  PermissionRequest hook fires
-         ↓
-Opus evaluates for ~2s: "is this safe given the task?"  →  allow / deny
-         ↓
-Agent continues on Haiku
-```
-
-Opus is the gatekeeper, not the worker. The bulk of compute stays on cheap models.
-
-**When models are deprecated:**
-
-Anthropic periodically retires old model IDs. If `.claude/settings.json` still references a deprecated model, the `PermissionRequest` hook fails silently — risky actions go through ungated, with no error visible to you.
-
-The supervisor detects this automatically. On every normal run it checks whether the hook model is still in the live model list:
-
-```
-⚠  PermissionRequest hook uses 'claude-opus-4-6' — this model is no longer available.
-   → Update .claude/settings.json with a current model.
-   → Recommended replacements (from live model list):
-       claude-opus-5-0
-```
-
-When you see this warning, open `.claude/settings.json` in your project and update the `"model"` field to the model shown. The supervisor fetches the list live so the suggestion is always current.
-
----
-
-## Project Memory (CLAUDE.md)
-
-`.claude/CLAUDE.md` is copied into every worktree. Every agent reads it automatically at session start. Fill in:
+`.claude/CLAUDE.md` is copied into every worktree. Every agent reads it at session start. Fill in:
 
 - **Project Overview** — what it does, stack, entry point
 - **Conventions** — style, naming, tests, branching
 - **Known Pitfalls** — grows over time as agents document corrections
 
-When an agent makes a mistake and gets corrected, it should add a note to Known Pitfalls. The next agent spawned will inherit that knowledge automatically.
+After every correction, tell the agent: *"Update CLAUDE.md so you don't make that mistake again."*
 
-### Syncing learnings back to the main repo
+### Syncing learnings
 
-Each worktree gets its own **copy** of CLAUDE.md. Updates an agent makes are local to that worktree — the main repo's copy is not automatically updated. When you remove a worktree, any unsynced knowledge is lost.
-
-**Why agents don't update the main CLAUDE.md directly:**
-
-- **Race conditions** — Multiple agents run in parallel. If they all wrote to the same file simultaneously, you'd get conflicts and corruption.
-- **Isolation** — Worktrees are separate git checkouts on separate branches. An agent reaching into the main repo's working directory to modify files would break the isolation model that makes parallel work safe.
-- **Review gate** — Not every agent-discovered "pitfall" is correct or relevant. The owner should review before merging into the shared memory that all future agents inherit.
-
-**The fix — two steps:**
-
-1. Tell agents to commit their CLAUDE.md changes with the rest of their work. The template already includes this instruction in the Agent Instructions section.
-
-2. Before removing worktrees, run `collect-learnings.sh` to diff each worktree's CLAUDE.md against the main and apply the new lines:
+Each worktree gets its own copy of CLAUDE.md. The Stop hook runs `collect-learnings.sh --yes` automatically when each agent finishes. To run it manually:
 
 ```bash
 # Interactive — prompts for each worktree
-bash /path/to/claude-supervisor/bin/collect-learnings.sh /path/to/your-project
+collect-learnings.sh ~/my-project
 
-# Non-interactive — auto-approve all merges (CI, scripts, testing)
-bash /path/to/claude-supervisor/bin/collect-learnings.sh --yes /path/to/your-project
+# Non-interactive (CI, scripts)
+collect-learnings.sh --yes ~/my-project
 ```
 
-The script walks all active worktrees, shows any new lines, and asks whether to apply each one (unless `--yes` is passed). New Known Pitfalls bullets are inserted into the correct section; other additions are appended at the end. Then commit the result:
+Then commit the result:
 
 ```bash
-git -C /path/to/your-project add .claude/CLAUDE.md
-git -C /path/to/your-project commit -m "docs: merge agent learnings"
+git -C ~/my-project add .claude/CLAUDE.md
+git -C ~/my-project commit -m "docs: merge agent learnings"
 ```
 
-This is the step that turns individual agent corrections into shared project memory.
+> **Note:** If you manually remove a worktree before `collect-learnings` runs, any CLAUDE.md updates in that worktree are lost. The Stop hook handles this automatically.
 
 ---
 
-## Custom Subagents
+## Custom agents
 
-Subagents are defined in `.claude/agents/` — each file has YAML frontmatter and a system prompt. Claude Code reads them automatically at session start.
+Agents live in `.claude/agents/` — YAML frontmatter plus a system prompt. Claude Code reads them at session start and delegates automatically based on task and description.
 
-**How delegation works:** Claude automatically delegates tasks based on the task description in your request, the `description` field in subagent configurations, and current context. That's why the `description:` needs to be specific and concrete — it's essentially a routing rule. You can also add `"Use proactively"` in the description to make the agent trigger more aggressively. You can also force it explicitly: *"Use the debugger subagent to look at this error."*
+`_example-agent.md` is a blank template. Copy it to create your own:
 
-Three subagents are included out of the box:
+```markdown
+---
+name: my-agent
+description: What this agent does and when to use it. Be specific — this is the routing rule.
+tools: Bash, Read, Edit
+---
 
-| Agent | Purpose |
+You are a specialist in ...
+```
+
+If you accepted the workspace-kit prompt on init, a curated set of agents (reviewer, debugger, test-writer, and more) is already installed.
+
+---
+
+## Stopping agents and cleanup
+
+```bash
+# Kill all agents
+tmux kill-session -t my-project-agents
+
+# Remove a specific worktree
+git worktree remove ../my-project-feat-oauth
+
+# Full cleanup (worktrees + branches + tmux session)
+supervisor uninstall --everything
+```
+
+| Scenario | Action |
 |---|---|
-| `reviewer.md` | Reviews code before a PR — flags critical issues, minor problems, and nits. Ends with APPROVE / REQUEST CHANGES. |
-| `debugger.md` | Diagnoses errors and failures, traces root causes, applies minimal fixes. |
-| `test-writer.md` | Writes unit and integration tests matching the project's existing style. |
-
-`_example-agent.md` is a blank template you can copy to create your own. Add as many as you need — each focused on one job.
-
-Any agent can delegate to a subagent via the `/agents` command or the `Task` tool.
+| Agents stuck/hung | `tmux kill-session -t project-agents` |
+| Agent finished, want to keep work | Open PR before removing worktree |
+| Agent failed, want to retry | `git worktree remove` → `git branch -D branch` → `supervisor` |
+| Terminal closed | Agents still running — `tmux attach` to reconnect |
 
 ---
 
-## Spawning a Single Agent
+## What gets committed
 
-`spawn-agent.sh` is independently runnable — you don't have to use the supervisor:
-
-```bash
-bash /path/to/claude-supervisor/bin/spawn-agent.sh /path/to/repo my-branch claude-sonnet-4-5-20250929 normal 0 "fix the login bug"
-```
-
-Arguments: `<repo_path> <branch_name> <model_id> <mode> <agent_index> "<task_prompt>"`
-
-- `agent_index` — assigns a color to the tmux window (0-7 for different colors). Use `0` if spawning just one agent.
-
-This creates the worktree, copies `.claude/`, opens a tmux window, and launches Claude — same as what the supervisor does, but for a single agent.
-
----
-
-## Terminal Setup
-
-- **tmux** — each agent gets its own tmux window, color-coded by index from a fixed palette. Plan-mode windows are always yellow.
-- **Statusline** — run `/statusline` once in any Claude session to enable the context usage + git branch bar globally.
-
----
-
-## File Structure
-
-```
-claude-supervisor/
-  bin/
-    supervisor.sh              # Entry point — run this
-    spawn-agent.sh             # Single agent launcher (also standalone)
-    collect-learnings.sh       # Merge CLAUDE.md updates from worktrees back to main
-    setup-shortcuts.sh         # Shell shortcuts installer (adds to ~/.zshrc)
-  lib/
-    utils.sh                   # Shared functions (both scripts source this)
-  templates/                   # Internal — never edit directly
-    tasks.conf                 # Scaffolded into project on first run
-    CLAUDE.md                  # Scaffolded into project .claude/
-    .claude/
-      settings.json            # PermissionRequest → Opus hook
-      agents/
-        reviewer.md            # Code review subagent
-        debugger.md            # Debugging subagent
-        test-writer.md         # Test writing subagent
-        _example-agent.md      # Blank template
-      commands/
-        techdebt.md            # /techdebt skill
-        explain.md             # /explain skill
-        diagram.md             # /diagram skill
-        learn.md               # /learn skill
-```
-
----
-
-## How Agents Run
-
-The supervisor uses **tmux** to run agents in the background. Each agent gets its own tmux window with a descriptive name. This works in any terminal (iTerm, Terminal.app, Ghostty, VS Code, etc.).
-
-After spawning, you have two ways to access agents:
-
-| Method | Best for | How |
+| Path | Git | Why |
 |---|---|---|
-| **tmux attach** | Monitoring all agents at once | `tmux attach -t session` + navigate with `Ctrl+b` |
-| **Separate tabs** | Easier navigation, familiar workflow | Copy the `cd ... && claude ...` commands into new tabs |
+| `.claude/CLAUDE.md` | Commit | Shared project memory — all agents read this |
+| `.claude/settings.local.json` | Your call | Contains supervisor's hook config; usually committed so team members get the same safety gating |
+| `.claude/agents/` | Commit | Subagents are project tools |
+| `.claude/skills/` | Commit | Skills are project tools |
+| `.claude/agents-shared/` | **Ignore** | Gitignored automatically — ephemeral peer notes |
+| `.env` | **Ignore** | API key — gitignored automatically |
+| `.claude/supervisor-agents.jsonl` | Ignore | Runtime state |
+| `.claude/supervisor-last.md` | Ignore | Last task list (personal) |
 
 ---
 
-## Effective Prompts & Patterns
+## Upgrading from 0.x to 1.0
 
-Patterns that work well when working with agents day-to-day.
+Version 1.0 removes `tasks.conf` and replaces it with prompt-based task input. The `supervisor migrate` command handles the upgrade safely.
 
----
+### What changed
 
-### CLAUDE.md as a correction loop
-
-After every mistake an agent makes and you correct it, tell it:
-
-> *"Update CLAUDE.md so you don't make that mistake again."*
-
-Over time this creates a project-specific rulebook. The next agent you spawn will inherit it and skip the same mistake entirely. The key habit is being ruthless about it — every correction, every time.
-
-The template CLAUDE.md has a **Known Pitfalls** section for exactly this. Keep it updated.
-
----
-
-### Autonomous bug fixing
-
-Point an agent at the problem and say "fix":
-
-```ini
-[task]
-prompt = go fix the failing CI tests — run them, read the errors, iterate until they pass
-
-[task]
-prompt = the login flow throws a null pointer on logout — read the stack trace in logs/app.log and fix it
-
-[task]
-prompt = read docker logs for the auth service and fix whatever is causing the 500s
-```
-
-You can also paste a raw error message or Slack thread directly into the task prompt. The agent will figure out where to start.
-
----
-
-### Claude as a harsh reviewer
-
-Use a plan-mode agent to review before merging:
-
-```ini
-[task]
-mode   = plan
-prompt = review the diff between main and feature-auth — act as a staff engineer, be harsh, flag anything that looks wrong, fragile, or incomplete. Do not approve until you are satisfied.
-
-[task]
-mode   = plan
-prompt = prove that the new auth flow actually works — trace the happy path and every failure case through the code
-
-[task]
-mode   = plan
-prompt = the last solution was too complex — scrap the approach and think through a simpler implementation
-```
-
-The "prove this works" pattern is especially useful. A reviewer agent that has to justify the logic tends to catch things a writing agent glosses over.
-
----
-
-### Turning repeat work into skills
-
-There are three places to put reusable work:
-
-- **`.claude/commands/`** — slash commands you invoke yourself (`/techdebt`, `/explain`, `/diagram`, `/learn`). Use for workflows you trigger intentionally.
-- **`.claude/agents/`** — subagents Claude delegates to automatically based on the task. Use for specialized roles (reviewer, debugger, test writer).
-- **`.claude/skills/`** — skills following the [Agent Skills](https://agentskills.io) open standard. Claude can load them automatically when the task matches their description, or you invoke them manually with `/skill-name`. Use for portable, shareable capabilities.
-
-If you do something more than once a week, it belongs in one of these. The rule of thumb: if *you* decide when to run it, it's a command. If *Claude* should decide when to delegate it, it's a subagent. If you want it portable, shareable, or auto-loaded by context, make it a skill.
-
-More ideas for commands:
-
-| Command | What it does |
+| 0.2.x | 1.0 |
 |---|---|
-| `pr-description.md` | Reads the diff and writes a detailed PR body |
-| `changelog.md` | Summarizes commits since the last tag into a CHANGELOG entry |
-| `onboarding.md` | Generates an HTML walkthrough of a module for a new engineer |
-| `db-query.md` | Writes and runs queries against your database CLI |
+| Edit `tasks.conf` (INI blocks) | Interactive prompt / stdin / argv |
+| `[task]` blocks with `key = value` | `- prompt text [tags]` |
+| supervisor scaffolds `settings.json` | supervisor scaffolds `settings.local.json` (overlay) |
+| agents/commands/skills in templates | Delegated to workspace-kit (or minimal fallback) |
+| No live dashboard | `supervisor watch` — live status table |
+| No auto collect-learnings | Stop hook fires automatically |
+| No peer notes | `.claude/agents-shared/`, `/share`, `/peers` |
+| No dependency staging | `[depends: branch]` inline tag |
 
-The database pattern deserves special mention: give the agent access to any DB with a CLI (`psql`, `sqlite3`, `bq`, etc.) and describe your intent in plain English. You stop writing queries and start describing outcomes.
-
----
-
-### Learning mode
-
-Enable explanatory output for any agent session via `/config` → output style → Explanatory. The agent will explain the *why* behind every change it makes, not just the *what*.
-
-Four built-in skills accelerate understanding:
-
-| Command | What it does |
-|---|---|
-| `/explain` | Explains what a file or function does, why it exists, and how it fits in |
-| `/diagram` | Draws an ASCII diagram of the architecture, data flow, or call chain |
-| `/learn` | Starts a Socratic learning session — you explain, Claude asks follow-ups, saves a summary |
-
-Ad-hoc prompts that also work well:
-
-> *"Generate an HTML presentation of this codebase I can step through like slides — one concept per slide."*
-
-> *"I'll explain my understanding of this code. Ask follow-up questions to fill any gaps."*
-
-These are especially useful when onboarding to an unfamiliar codebase before spawning worker agents.
-
----
-
-### Shell aliases for session navigation
-
-Add these to your `~/.zshrc` or `~/.bashrc` to hop between agent windows in one keystroke:
+### Migration steps
 
 ```bash
-# Jump to agent window by letter — adjust session name as needed
-alias za='tmux select-window -t agents:0'
-alias zb='tmux select-window -t agents:1'
-alias zc='tmux select-window -t agents:2'
-alias zd='tmux select-window -t agents:3'
+# Run the guided migration
+supervisor migrate ~/my-project
 
-# Or jump by branch name (fuzzy)
-agent() { tmux select-window -t "$(tmux list-windows -F '#{window_name}' | fzf --query="$1" --select-1)"; }
+# Then run supervisor normally
+supervisor ~/my-project
 ```
 
-The `agent` function with `fzf` lets you type `agent login` and jump straight to the `feature-login` window without counting indices.
+The migration backs up `.claude/`, moves hook config to `settings.local.json`, archives `tasks.conf`, and optionally runs workspace-kit init. Your existing agents, skills, and commands are left untouched.
+
+### Rollback
+
+```bash
+rm -rf .claude && mv .claude.backup-* .claude
+# Reinstall 0.2.x if needed:
+npm install -g claude-supervisor@0.2
+```
 
 ---
 
-## Running Tests
-
-Smoke tests verify that all functions and scripts work correctly:
+## Contributing
 
 ```bash
-npm test
-# or
-bash tests/smoke.sh
+git clone https://github.com/allexcd/claude-supervisor
+cd claude-supervisor
+npm test          # runs tests/smoke.sh — no API key or tmux required
 ```
-
-The test suite checks: `slugify`, `print_banner`, `check_deps`, auto-init scaffolding, `tasks.conf` parsing, and `spawn-agent.sh` argument validation — all without needing an API key or tmux.
-
----
-
-## Release Workflow
-
-Publishing is automated via GitHub Actions — pushing a tag triggers the CI + publish pipeline.
-
-```bash
-# Bump version, commit, tag, and trigger publish — all in one:
-npm run release:patch   # 0.1.2 → 0.1.3
-npm run release:minor   # 0.1.2 → 0.2.0
-npm run release:major   # 0.1.2 → 1.0.0
-```
-
-What happens:
-1. `npm version` updates `package.json` and `VERSION`, commits, and creates a git tag
-2. `git push --tags` pushes the tag to GitHub
-3. GitHub Actions runs the smoke tests, then publishes to npm automatically
-
-No manual `npm publish` needed.
 
 ---
 

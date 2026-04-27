@@ -69,12 +69,24 @@ fi
 # ─── Copy .claude/ directory ────────────────────────────────────────────────
 
 if [[ -d "$repo_path/.claude" ]]; then
-  agent_info "Copying .claude/ into worktree  (CLAUDE.md, agents/, commands/, settings.json)"
+  agent_info "Copying .claude/ into worktree  (CLAUDE.md, agents/, settings.local.json)"
   rm -rf "$worktree_path/.claude"
   cp -r "$repo_path/.claude" "$worktree_path/.claude"
   agent_ok "Config ready"
 else
   agent_info "No .claude/ directory in repo — skipping copy"
+fi
+
+# ─── Symlink agents-shared ───────────────────────────────────────────────────
+# agents-shared/ lives in the main repo (gitignored) and is symlinked into each
+# worktree so all agents share one directory (one file per agent, no race conditions).
+
+shared_src="$repo_path/.claude/agents-shared"
+shared_dst="$worktree_path/.claude/agents-shared"
+if [[ -d "$shared_src" ]]; then
+  rm -rf "$shared_dst"
+  ln -sf "$shared_src" "$shared_dst"
+  agent_ok "agents-shared symlinked to main repo"
 fi
 
 # ─── Tmux session setup ─────────────────────────────────────────────────────
