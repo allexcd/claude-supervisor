@@ -6,15 +6,15 @@
 [![License](https://img.shields.io/github/license/allexcd/claude-supervisor)](LICENSE)
 [![node](https://img.shields.io/node/v/claude-supervisor)](https://nodejs.org)
 
-Spin up **parallel Claude Code agents** in isolated git worktrees — each with its own task, model, and mode — by describing your work in plain bullet points.
+Spin up **parallel Claude Code agents** in isolated git worktrees — each with its own task, model, and mode — by describing your work in plain prompts.
 
 ```bash
-supervisor                                          # opens $EDITOR with a task stub
+supervisor                                          # interactive prompt — type tasks one by one
 supervisor run "implement OAuth" "write tests [depends: implement-oauth]"
 echo "- fix the login bug [model: haiku]" | supervisor
 ```
 
-On first run it scaffolds `.claude/` with a safety hook and peer-notes directory. On every run after that it reads your bullet list, prompts for any missing models, confirms, and spawns one agent per bullet: branch created, worktree created, Claude launched in a tmux window. A live watch dashboard opens in window 0. When an agent finishes, `collect-learnings` runs automatically.
+On first run it scaffolds `.claude/` with a safety hook and peer-notes directory. On every run after that it prompts for tasks, confirms, and spawns one agent per task: branch created, worktree created, Claude launched in a tmux window. A live watch dashboard opens in window 0. When an agent finishes, `collect-learnings` runs automatically.
 
 ---
 
@@ -28,7 +28,7 @@ claude-supervisor is the **batch-orchestration layer on top of native Claude Cod
 - Subagents, skills, hooks, session resume/fork — all first-class in Claude Code
 
 **What supervisor adds:**
-- **Batch task input** — describe N tasks in one bullet list, get N parallel agents. Native `claude -w` is one-at-a-time; experimental Agent Teams uses a single-session split-pane model. Neither has the "paste a list, walk away" workflow.
+- **Batch task input** — describe N tasks, get N parallel agents. Native `claude -w` is one-at-a-time; experimental Agent Teams uses a single-session split-pane model. Neither has the "describe a list, walk away" workflow.
 - **Per-task model differentiation** — task A on Haiku, task B on Opus, task C in plan mode, all in one invocation.
 - **Workflow lifecycle** — dependency staging (`[depends: …]`), automatic `collect-learnings` on agent finish, shared peer notes between parallel agents, migrate / uninstall tooling.
 - **Opinionated patterns** — plan-then-execute, `PermissionRequest → Opus` safety routing, workspace-kit integration.
@@ -112,7 +112,7 @@ bash claude-supervisor/bin/supervisor.sh ~/my-project
 
 ---
 
-## Quick Start
+## Quick start
 
 ### 1. First run — scaffold the project
 
@@ -137,15 +137,28 @@ If you accept the workspace-kit prompt, `.claude/agents/`, `.claude/skills/`, et
 
 ### 2. Enter your tasks
 
-After scaffolding, supervisor opens `$EDITOR` with a task stub in the same run. Save and close to spawn agents:
+After scaffolding, supervisor prompts you for tasks in the same run:
 
-```markdown
-- review the codebase and write an implementation plan [plan, model: opus]
-- implement the OAuth login flow [model: sonnet, branch: feat-oauth]
-- write tests for OAuth [depends: feat-oauth]
+```
+  Optional tags: [model: sonnet|haiku|opus]  [plan]  [branch: name]  [depends: branch]
+
+  What would you like to work on?
+  > review the codebase and write an implementation plan [plan, model: opus]
+
+  Add another task? [y/N] y
+
+  Task 2:
+  > implement the OAuth login flow [model: sonnet, branch: feat-oauth]
+
+  Add another task? [y/N] y
+
+  Task 3:
+  > write tests for OAuth [depends: feat-oauth]
+
+  Add another task? [y/N] n
 ```
 
-Or skip the editor:
+Or skip the prompt entirely:
 
 ```bash
 # Pipe tasks directly
@@ -186,8 +199,6 @@ tmux attach -t my-project-agents
 | `Ctrl+b 0` | Jump to watch dashboard |
 | `Ctrl+b d` | Detach (agents keep running) |
 
-Or open each agent in its own terminal tab — supervisor prints the `cd … && claude …` command for each.
-
 ### 5. After agents finish
 
 When an agent's session ends, the Stop hook fires automatically:
@@ -214,7 +225,7 @@ supervisor uninstall --everything
 - <task description> [tag, tag, ...]
 ```
 
-Tags go inside `[…]` at the end of the bullet, comma-separated:
+Tags go inside `[…]` at the end of the line, comma-separated:
 
 | Tag | Effect |
 |---|---|
@@ -225,7 +236,7 @@ Tags go inside `[…]` at the end of the bullet, comma-separated:
 
 **Examples:**
 
-```markdown
+```
 # Plain — branch auto-generated, model prompted
 - refactor the database layer
 
@@ -237,9 +248,6 @@ Tags go inside `[…]` at the end of the bullet, comma-separated:
 
 # Dependency — spawns only after feat-oauth agent finishes
 - write tests for OAuth [depends: feat-oauth, model: haiku]
-
-# Multiple tags
-- fix the session timeout bug [model: haiku, branch: fix-session]
 ```
 
 **Rules:**
@@ -252,7 +260,7 @@ Tags go inside `[…]` at the end of the bullet, comma-separated:
 
 | Invocation | Mode |
 |---|---|
-| `supervisor` (TTY, no args) | Opens `$EDITOR` with a stub |
+| `supervisor` (TTY, no args) | Interactive prompt — type tasks one by one |
 | `supervisor < tasks.md` | Reads from stdin |
 | `echo "- task" \| supervisor` | Reads from stdin |
 | `supervisor run "task1" "task2"` | Reads from argv |
@@ -292,27 +300,25 @@ Parallel agents working in separate worktrees can communicate via an append-only
 
 The `/share` skill appends a timestamped line to `.claude/agents-shared/<branch>.md`. The `/peers` skill reads all files in that directory. Each agent writes only its own file — no race conditions.
 
-The `agents-shared/` directory lives in the main repo (gitignored) and is symlinked into each worktree automatically by `spawn-agent.sh`.
-
 ---
 
 ## Dependency staging
 
-Add `[depends: branch-name]` to a bullet to stage that agent behind another:
+Add `[depends: branch-name]` to a task to stage it behind another:
 
-```markdown
+```
 - implement the OAuth login flow [model: sonnet, branch: feat-oauth]
 - write tests for OAuth [depends: feat-oauth, model: haiku]
 ```
 
-supervisor spawns the `feat-oauth` agent immediately. The `write-tests` agent is held in a background polling loop. When the `feat-oauth` agent's Stop hook fires, the test-writer spawns automatically — with the dependency's diff summary prepended to its prompt as context.
+supervisor spawns the `feat-oauth` agent immediately. The `write-tests` agent is held until the `feat-oauth` agent's Stop hook fires, then spawns automatically — with the dependency's diff summary prepended to its prompt as context.
 
 ---
 
 ## Subcommands
 
 ```bash
-supervisor                        # enter tasks (editor / stdin / argv)
+supervisor                        # enter tasks (interactive / stdin / argv)
 supervisor run "t1" "t2" ...      # argv mode
 supervisor last                   # respawn previous session
 supervisor list                   # show active agents from state file
@@ -322,7 +328,6 @@ supervisor update [repo]          # refresh workspace-kit + supervisor overlay
 supervisor doctor [repo]          # diagnose project state
 supervisor migrate [repo]         # upgrade 0.2.x → 1.0 layout
 supervisor uninstall [--dry-run] [--with-workspace] [--everything] [repo]
-supervisor on-stop                # Stop hook target (called by Claude Code internally)
 ```
 
 **`supervisor doctor`** — prints current state: git repo, settings.local.json, hooks, agents-shared, workspace-kit, active worktrees, tmux session, and dependencies.
@@ -337,14 +342,14 @@ supervisor on-stop                # Stop hook target (called by Claude Code inte
 
 ## Modes
 
-| Mode | Flag | What it does |
-|---|---|---|
-| `normal` | _(default)_ | Agent reads and writes freely. Use for implementation tasks. |
-| `plan` | `--permission-mode plan` | Agent can read but won't modify files until you approve each action. Plan-mode tmux windows are always **yellow**. |
+| Mode | What it does |
+|---|---|
+| `normal` _(default)_ | Agent reads and writes freely. Use for implementation tasks. |
+| `plan` | Agent can read but won't modify files until you approve each action. Plan-mode tmux windows are always **yellow**. |
 
 **Pattern — plan then execute:**
 
-```markdown
+```
 # Step 1: spawn planner
 - review the codebase and write a detailed implementation plan [plan, model: opus]
 
@@ -367,7 +372,7 @@ After every correction, tell the agent: *"Update CLAUDE.md so you don't make tha
 
 ### Syncing learnings
 
-Each worktree gets its own **copy** of CLAUDE.md. The Stop hook runs `collect-learnings.sh --yes` automatically when each agent finishes. To run it manually:
+Each worktree gets its own copy of CLAUDE.md. The Stop hook runs `collect-learnings.sh --yes` automatically when each agent finishes. To run it manually:
 
 ```bash
 # Interactive — prompts for each worktree
@@ -384,7 +389,7 @@ git -C ~/my-project add .claude/CLAUDE.md
 git -C ~/my-project commit -m "docs: merge agent learnings"
 ```
 
-> **Important:** If you manually remove a worktree before `collect-learnings` runs, any CLAUDE.md updates in that worktree are lost. The Stop hook handles this automatically; the manual command is for cases where you remove worktrees early.
+> **Note:** If you manually remove a worktree before `collect-learnings` runs, any CLAUDE.md updates in that worktree are lost. The Stop hook handles this automatically.
 
 ---
 
@@ -419,15 +424,11 @@ git worktree remove ../my-project-feat-oauth
 
 # Full cleanup (worktrees + branches + tmux session)
 supervisor uninstall --everything
-
-# Start fresh (re-run after cleanup)
-supervisor
 ```
 
 | Scenario | Action |
 |---|---|
 | Agents stuck/hung | `tmux kill-session -t project-agents` |
-| Start fresh | Kill session → `supervisor` (reuses existing worktrees if they exist) |
 | Agent finished, want to keep work | Open PR before removing worktree |
 | Agent failed, want to retry | `git worktree remove` → `git branch -D branch` → `supervisor` |
 | Terminal closed | Agents still running — `tmux attach` to reconnect |
@@ -451,13 +452,13 @@ supervisor
 
 ## Upgrading from 0.x to 1.0
 
-Version 1.0 removes `tasks.conf` and replaces it with bullet-list input. The `supervisor migrate` command handles the upgrade safely.
+Version 1.0 removes `tasks.conf` and replaces it with prompt-based task input. The `supervisor migrate` command handles the upgrade safely.
 
 ### What changed
 
 | 0.2.x | 1.0 |
 |---|---|
-| Edit `tasks.conf` (INI blocks) | Bullet-list input (editor / stdin / argv) |
+| Edit `tasks.conf` (INI blocks) | Interactive prompt / stdin / argv |
 | `[task]` blocks with `key = value` | `- prompt text [tags]` |
 | supervisor scaffolds `settings.json` | supervisor scaffolds `settings.local.json` (overlay) |
 | agents/commands/skills in templates | Delegated to workspace-kit (or minimal fallback) |
@@ -469,20 +470,14 @@ Version 1.0 removes `tasks.conf` and replaces it with bullet-list input. The `su
 ### Migration steps
 
 ```bash
-# 1. Run the guided migration
+# Run the guided migration
 supervisor migrate ~/my-project
 
-# What it does:
-#   - Backs up .claude/ → .claude.backup-YYYYMMDD-HHMMSS/
-#   - Moves PermissionRequest hook from settings.json → settings.local.json
-#   - Renames settings.json → settings.json.v0-backup (your agents/skills/commands untouched)
-#   - Optionally runs npx claude-workspace-kit init
-#   - Adds fenced supervisor block to CLAUDE.md
-#   - Offers to archive tasks.conf
-
-# 2. Run supervisor normally after migration
+# Then run supervisor normally
 supervisor ~/my-project
 ```
+
+The migration backs up `.claude/`, moves hook config to `settings.local.json`, archives `tasks.conf`, and optionally runs workspace-kit init. Your existing agents, skills, and commands are left untouched.
 
 ### Rollback
 
@@ -492,68 +487,15 @@ rm -rf .claude && mv .claude.backup-* .claude
 npm install -g claude-supervisor@0.2
 ```
 
-### Diagnosis
-
-```bash
-supervisor doctor ~/my-project    # check current state before or after migration
-```
-
 ---
 
-## Running tests
+## Contributing
 
 ```bash
-npm test
-# or
-bash tests/smoke.sh
+git clone https://github.com/allexcd/claude-supervisor
+cd claude-supervisor
+npm test          # runs tests/smoke.sh — no API key or tmux required
 ```
-
-224 tests covering: bullet parser (all tag combinations), auto-init flows, watch dashboard, jsonl-tail, stop hook, shared-notes symlink, dependency staging, migrate/uninstall/doctor routing, spawn-agent, collect-learnings, and more. No API key or tmux required.
-
----
-
-## File structure
-
-```
-claude-supervisor/
-  bin/
-    supervisor.sh           # Entry point — run this
-    spawn-agent.sh          # Single agent launcher (also standalone)
-    collect-learnings.sh    # Merge CLAUDE.md updates from worktrees → main
-    watch.sh                # Live agent status dashboard
-    update.sh               # Refresh workspace-kit + supervisor overlay
-    on-stop.sh              # Claude Code Stop hook target
-    migrate.sh              # 0.2.x → 1.0 migration
-    uninstall.sh            # Remove supervisor from a project
-    doctor.sh               # Diagnose project state
-  lib/
-    utils.sh                # Shared functions
-    parse-bullets.sh        # Bullet-list task parser
-    jsonl-tail.mjs          # Node.js session JSONL reader (for watch dashboard)
-  templates/
-    CLAUDE.md               # Project memory template
-    .claude/
-      settings.local.json   # PermissionRequest + Stop hooks
-      agents/
-        _example-agent.md   # Blank agent template
-      skills/
-        share/SKILL.md      # /share — post a peer note
-        peers/SKILL.md      # /peers — read peer notes
-  tests/
-    smoke.sh                # Test suite
-```
-
----
-
-## Release workflow
-
-```bash
-npm run release:patch   # 0.1.2 → 0.1.3
-npm run release:minor   # 0.1.2 → 0.2.0
-npm run release:major   # 0.1.2 → 1.0.0
-```
-
-Each command bumps `package.json` + `VERSION`, commits, tags, and pushes. GitHub Actions runs the smoke tests then publishes to npm automatically.
 
 ---
 
