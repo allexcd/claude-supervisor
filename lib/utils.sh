@@ -411,7 +411,7 @@ show_available_models() {
   local repo="${1:-}"
 
   echo ""
-  printf "  ${BOLD}Common model IDs for the 'model' field in tasks.conf:${RESET}\n"
+  printf "  ${BOLD}Common model IDs (use in the 'model' field or pass --model):${RESET}\n"
   echo ""
 
   # Always show the static/common models

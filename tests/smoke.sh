@@ -122,11 +122,42 @@ long_banner="$(print_banner "review the codebase and write a detailed implementa
 assert_contains "long task is truncated with ..." "..." "$long_banner"
 assert_contains "plan mode shown" "plan" "$long_banner"
 
-# ─── Test: auto-init (supervisor first run) ──────────────────────────────────
+# ─── Helper: create a minimal mock PATH for workspace-kit responses ───────────
+
+# Creates a mock npx that simulates "workspace-kit declined" (exits 1 or never called)
+# We rely on the supervisor's stdin being /dev/null (empty) so the read gets ""
+# which defaults to "Y", but with a mocked npx that fails → falls back to minimal scaffold.
+
+_make_mock_npx_fail() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat > "$dir/npx" <<'MOCK'
+#!/usr/bin/env bash
+# Mock npx that always fails (simulates workspace-kit not found / install failure)
+exit 1
+MOCK
+  chmod +x "$dir/npx"
+}
+
+_make_mock_npx_succeed() {
+  local dir="$1" repo_path="$2"
+  mkdir -p "$dir"
+  cat > "$dir/npx" <<MOCK
+#!/usr/bin/env bash
+# Mock npx claude-workspace-kit init — creates minimal .cwk.lock and .claude/
+mkdir -p "${repo_path}/.claude/agents"
+touch "${repo_path}/.cwk.lock"
+touch "${repo_path}/.claude/settings.json"
+exit 0
+MOCK
+  chmod +x "$dir/npx"
+}
+
+# ─── Test: auto-init — minimal fallback (workspace-kit declined / fails) ──────
 
 echo ""
-echo "supervisor auto-init"
-echo "────────────────────"
+echo "supervisor auto-init (minimal fallback)"
+echo "───────────────────────────────────────"
 
 test_repo="/tmp/claude-supervisor-test-$$"
 mkdir -p "$test_repo"
@@ -137,25 +168,41 @@ touch "$test_repo/README.md"
 git -C "$test_repo" add . &>/dev/null
 git -C "$test_repo" commit -m "init" &>/dev/null
 
-# Run supervisor — should scaffold and exit 0
-output="$(bash "$PROJECT_ROOT/bin/supervisor.sh" "$test_repo" 2>&1)" || true
+mock_bin_init="/tmp/mock-npx-init-$$"
+_make_mock_npx_fail "$mock_bin_init"
 
-assert_file_exists "tasks.conf created" "$test_repo/tasks.conf"
-assert_file_exists ".claude/ created" "$test_repo/.claude"
-assert_file_exists ".claude/CLAUDE.md created" "$test_repo/.claude/CLAUDE.md"
-assert_file_exists ".claude/settings.json created" "$test_repo/.claude/settings.json"
-assert_file_exists ".claude/agents/ created" "$test_repo/.claude/agents"
-assert_file_exists ".claude/agents/reviewer.md created" "$test_repo/.claude/agents/reviewer.md"
-assert_file_exists ".claude/agents/debugger.md created" "$test_repo/.claude/agents/debugger.md"
-assert_file_exists ".claude/agents/test-writer.md created" "$test_repo/.claude/agents/test-writer.md"
-assert_file_exists ".claude/commands/ created" "$test_repo/.claude/commands"
-assert_file_exists ".claude/commands/techdebt.md created" "$test_repo/.claude/commands/techdebt.md"
-assert_file_exists ".claude/commands/explain.md created" "$test_repo/.claude/commands/explain.md"
-assert_file_exists ".claude/commands/diagram.md created" "$test_repo/.claude/commands/diagram.md"
-assert_file_exists ".claude/commands/learn.md created" "$test_repo/.claude/commands/learn.md"
-assert_contains "init message mentions tasks.conf" "tasks.conf" "$output"
+# Run supervisor with mocked npx (fails → minimal fallback) and answer "n" to stdin
+output="$(echo "n" | PATH="$mock_bin_init:$PATH" bash "$PROJECT_ROOT/bin/supervisor.sh" "$test_repo" 2>&1)" || true
+
+assert_file_exists "tasks.conf created (minimal)"     "$test_repo/tasks.conf"
+assert_file_exists ".claude/ created (minimal)"        "$test_repo/.claude"
+assert_file_exists ".claude/CLAUDE.md created"         "$test_repo/.claude/CLAUDE.md"
+assert_file_exists ".claude/settings.local.json"       "$test_repo/.claude/settings.local.json"
+assert_file_exists ".claude/agents-shared/ created"    "$test_repo/.claude/agents-shared"
+assert_file_exists ".claude/agents/_example-agent.md"  "$test_repo/.claude/agents/_example-agent.md"
+assert_contains "init message mentions tasks.conf"     "tasks.conf" "$output"
 assert_contains "model discovery runs during scaffold" "Available models" "$output"
-assert_contains "skips models without tty/key" "omit the model field" "$output"
+
+# No workspace-kit-owned files should exist
+if [[ ! -f "$test_repo/.claude/agents/reviewer.md" ]]; then
+  pass "reviewer.md not created (workspace-kit not installed)"
+else
+  fail "reviewer.md should not exist in minimal fallback"
+fi
+if [[ ! -f "$test_repo/.claude/settings.json" ]]; then
+  pass "settings.json not created (workspace-kit owns it)"
+else
+  fail "settings.json should not exist in minimal fallback"
+fi
+
+# settings.local.json must contain PermissionRequest hook
+settings_local_content="$(cat "$test_repo/.claude/settings.local.json")"
+assert_contains "settings.local.json has PermissionRequest hook" "PermissionRequest" "$settings_local_content"
+
+# CLAUDE.md must contain the fenced supervisor block
+claude_md_content="$(cat "$test_repo/.claude/CLAUDE.md")"
+assert_contains "CLAUDE.md has supervisor fenced block" "BEGIN claude-supervisor" "$claude_md_content"
+assert_contains "CLAUDE.md fenced block closed"         "END claude-supervisor"   "$claude_md_content"
 
 # Verify tasks.conf is added to .gitignore
 assert_file_exists ".gitignore created" "$test_repo/.gitignore"
@@ -164,8 +211,13 @@ if grep -qx "tasks.conf" "$test_repo/.gitignore" 2>/dev/null; then
 else
   fail ".gitignore missing tasks.conf entry"
 fi
+if grep -q ".claude/agents-shared/" "$test_repo/.gitignore" 2>/dev/null; then
+  pass ".gitignore contains .claude/agents-shared/"
+else
+  fail ".gitignore missing .claude/agents-shared/ entry"
+fi
 
-# Verify file contents are not empty
+# Verify tasks.conf has content
 tasks_size=$(wc -c < "$test_repo/tasks.conf")
 if (( tasks_size > 100 )); then
   pass "tasks.conf has content (${tasks_size} bytes)"
@@ -173,39 +225,65 @@ else
   fail "tasks.conf seems empty (${tasks_size} bytes)"
 fi
 
-claude_md_size=$(wc -c < "$test_repo/.claude/CLAUDE.md")
-if (( claude_md_size > 100 )); then
-  pass "CLAUDE.md has content (${claude_md_size} bytes)"
-else
-  fail "CLAUDE.md seems empty (${claude_md_size} bytes)"
-fi
+rm -rf "$mock_bin_init"
 
-settings_size=$(wc -c < "$test_repo/.claude/settings.json")
-if (( settings_size > 50 )); then
-  pass "settings.json has content (${settings_size} bytes)"
-else
-  fail "settings.json seems empty (${settings_size} bytes)"
-fi
+# ─── Test: auto-init — workspace-kit detected (.cwk.lock present) ─────────────
 
-# ─── Test: auto-init skips if .claude/ already exists ────────────────────────
+echo ""
+echo "supervisor auto-init (.cwk.lock branch)"
+echo "────────────────────────────────────────"
+
+cwk_repo="/tmp/claude-supervisor-cwk-$$"
+mkdir -p "$cwk_repo/.claude"
+git -C "$cwk_repo" init -b main &>/dev/null
+git -C "$cwk_repo" config user.email "ci@test.local"
+git -C "$cwk_repo" config user.name "CI Test"
+touch "$cwk_repo/README.md"
+touch "$cwk_repo/.cwk.lock"
+git -C "$cwk_repo" add . &>/dev/null
+git -C "$cwk_repo" commit -m "init" &>/dev/null
+
+# Inject some existing content into CLAUDE.md to verify it's preserved
+echo "# Existing project memory" > "$cwk_repo/.claude/CLAUDE.md"
+
+cwk_output="$(bash "$PROJECT_ROOT/bin/supervisor.sh" "$cwk_repo" 2>&1)" || true
+
+assert_file_exists "settings.local.json created (.cwk.lock path)" "$cwk_repo/.claude/settings.local.json"
+assert_file_exists "agents-shared/ created (.cwk.lock path)"      "$cwk_repo/.claude/agents-shared"
+assert_contains    ".cwk.lock detected in output"                  ".cwk.lock" "$cwk_output"
+
+# Existing CLAUDE.md content must be preserved (we only append, never replace)
+cwk_claude_content="$(cat "$cwk_repo/.claude/CLAUDE.md")"
+assert_contains "existing CLAUDE.md content preserved" "Existing project memory" "$cwk_claude_content"
+assert_contains "supervisor block appended to existing CLAUDE.md" "BEGIN claude-supervisor" "$cwk_claude_content"
+
+rm -rf "$cwk_repo"
+
+# ─── Test: auto-init — .claude/ already exists with content ──────────────────
 
 echo ""
 echo "auto-init idempotency"
 echo "─────────────────────"
 
-# Remove tasks.conf but keep .claude/ — re-run should NOT overwrite .claude/
-rm "$test_repo/tasks.conf"
+# settings.local.json is now the init marker; re-run with it present should skip
+# (skip straight to normal run — which needs tasks.conf to not error)
+# First, make sure tasks.conf exists so the normal run reaches task spawn
 echo "custom content" > "$test_repo/.claude/CLAUDE.md"
-
 output2="$(bash "$PROJECT_ROOT/bin/supervisor.sh" "$test_repo" 2>&1)" || true
 
-custom_content="$(cat "$test_repo/.claude/CLAUDE.md")"
-assert_eq ".claude/CLAUDE.md preserved when .claude/ exists" \
-  "custom content" \
-  "$custom_content"
-assert_contains "warns about existing .claude/" ".claude/ directory already exists" "$output2"
+# Init must NOT run again (settings.local.json already exists)
+# We know init didn't run if output2 doesn't contain "Initialising..."
+if [[ "$output2" != *"Initialising"* ]]; then
+  pass "init skipped on re-run (settings.local.json present)"
+else
+  fail "init ran again on re-run — settings.local.json should prevent it"
+fi
 
-# Verify .gitignore was not duplicated on re-run
+# The CLAUDE.md custom content must survive across re-runs
+custom_content="$(cat "$test_repo/.claude/CLAUDE.md")"
+assert_eq ".claude/CLAUDE.md preserved across re-runs" "custom content" "$custom_content"
+
+# Verify .gitignore was not duplicated on re-run (tasks.conf entry added in first run)
 gitignore_count=$(grep -cx "tasks.conf" "$test_repo/.gitignore")
 if (( gitignore_count == 1 )); then
   pass ".gitignore tasks.conf entry not duplicated on re-run"
@@ -224,14 +302,46 @@ touch "$test_repo_gi/README.md"
 git -C "$test_repo_gi" add . &>/dev/null
 git -C "$test_repo_gi" commit -m "init" &>/dev/null
 
-bash "$PROJECT_ROOT/bin/supervisor.sh" "$test_repo_gi" &>/dev/null || true
+mock_bin_gi="/tmp/mock-npx-gi-$$"
+_make_mock_npx_fail "$mock_bin_gi"
+echo "n" | PATH="$mock_bin_gi:$PATH" bash "$PROJECT_ROOT/bin/supervisor.sh" "$test_repo_gi" &>/dev/null || true
 
 if grep -q "node_modules/" "$test_repo_gi/.gitignore" && grep -qx "tasks.conf" "$test_repo_gi/.gitignore"; then
   pass ".gitignore appended to (preserves existing entries)"
 else
   fail ".gitignore existing content lost or tasks.conf not added"
 fi
-rm -rf "$test_repo_gi"
+rm -rf "$test_repo_gi" "$mock_bin_gi"
+
+# ─── Test: auto-init — workspace-kit succeeds (mocked npx) ───────────────────
+
+echo ""
+echo "supervisor auto-init (workspace-kit success)"
+echo "─────────────────────────────────────────────"
+
+wk_success_repo="/tmp/claude-supervisor-wk-success-$$"
+mkdir -p "$wk_success_repo"
+git -C "$wk_success_repo" init -b main &>/dev/null
+git -C "$wk_success_repo" config user.email "ci@test.local"
+git -C "$wk_success_repo" config user.name "CI Test"
+touch "$wk_success_repo/README.md"
+git -C "$wk_success_repo" add . &>/dev/null
+git -C "$wk_success_repo" commit -m "init" &>/dev/null
+
+mock_bin_wk="/tmp/mock-npx-wk-$$"
+_make_mock_npx_succeed "$mock_bin_wk" "$wk_success_repo"
+
+# Answer "y" to workspace-kit prompt
+wk_output="$(echo "y" | PATH="$mock_bin_wk:$PATH" bash "$PROJECT_ROOT/bin/supervisor.sh" "$wk_success_repo" 2>&1)" || true
+
+# workspace-kit mock creates .cwk.lock and settings.json
+assert_file_exists ".cwk.lock created by workspace-kit"         "$wk_success_repo/.cwk.lock"
+# supervisor always adds settings.local.json regardless
+assert_file_exists "settings.local.json added on top of cwk"   "$wk_success_repo/.claude/settings.local.json"
+assert_file_exists "agents-shared/ created"                     "$wk_success_repo/.claude/agents-shared"
+assert_contains    "output confirms workspace-kit init"          "workspace-kit" "$wk_output"
+
+rm -rf "$wk_success_repo" "$mock_bin_wk"
 
 # ─── Test: save_api_key_to_env ───────────────────────────────────────────────
 
@@ -748,38 +858,60 @@ echo ""
 echo "template files"
 echo "──────────────"
 
-assert_file_exists "templates/tasks.conf exists" "$PROJECT_ROOT/templates/tasks.conf"
-assert_file_exists "templates/CLAUDE.md exists" "$PROJECT_ROOT/templates/CLAUDE.md"
-assert_file_exists "templates/.claude/settings.json exists" "$PROJECT_ROOT/templates/.claude/settings.json"
-assert_file_exists "templates/.claude/agents/reviewer.md exists" "$PROJECT_ROOT/templates/.claude/agents/reviewer.md"
-assert_file_exists "templates/.claude/agents/debugger.md exists" "$PROJECT_ROOT/templates/.claude/agents/debugger.md"
-assert_file_exists "templates/.claude/agents/test-writer.md exists" "$PROJECT_ROOT/templates/.claude/agents/test-writer.md"
-assert_file_exists "templates/.claude/agents/_example-agent.md exists" "$PROJECT_ROOT/templates/.claude/agents/_example-agent.md"
-assert_file_exists "templates/.claude/commands/techdebt.md exists" "$PROJECT_ROOT/templates/.claude/commands/techdebt.md"
-assert_file_exists "templates/.claude/commands/explain.md exists" "$PROJECT_ROOT/templates/.claude/commands/explain.md"
-assert_file_exists "templates/.claude/commands/diagram.md exists" "$PROJECT_ROOT/templates/.claude/commands/diagram.md"
-assert_file_exists "templates/.claude/commands/learn.md exists" "$PROJECT_ROOT/templates/.claude/commands/learn.md"
+assert_file_exists "templates/tasks.conf exists"                   "$PROJECT_ROOT/templates/tasks.conf"
+assert_file_exists "templates/CLAUDE.md exists"                    "$PROJECT_ROOT/templates/CLAUDE.md"
+assert_file_exists "templates/.claude/settings.local.json exists"  "$PROJECT_ROOT/templates/.claude/settings.local.json"
+assert_file_exists "templates/.claude/agents/_example-agent.md"    "$PROJECT_ROOT/templates/.claude/agents/_example-agent.md"
+
+# workspace-kit-owned files must NOT be in templates/ (workspace-kit manages them)
+if [[ ! -f "$PROJECT_ROOT/templates/.claude/settings.json" ]]; then
+  pass "templates/.claude/settings.json removed (workspace-kit owns it)"
+else
+  fail "templates/.claude/settings.json should have been removed"
+fi
+if [[ ! -f "$PROJECT_ROOT/templates/.claude/agents/reviewer.md" ]]; then
+  pass "templates/.claude/agents/reviewer.md removed (workspace-kit owns it)"
+else
+  fail "templates/.claude/agents/reviewer.md should have been removed"
+fi
+if [[ ! -d "$PROJECT_ROOT/templates/.claude/commands" ]]; then
+  pass "templates/.claude/commands/ removed (workspace-kit owns it)"
+else
+  fail "templates/.claude/commands/ should have been removed"
+fi
+if [[ ! -d "$PROJECT_ROOT/templates/.claude/skills" ]]; then
+  pass "templates/.claude/skills/ removed (workspace-kit owns it)"
+else
+  fail "templates/.claude/skills/ should have been removed"
+fi
 
 # Verify tasks.conf uses INI block format
 tasks_conf_content="$(cat "$PROJECT_ROOT/templates/tasks.conf")"
 assert_contains "tasks.conf has [task] headers" "[task]" "$tasks_conf_content"
 assert_contains "tasks.conf has prompt field" "prompt =" "$tasks_conf_content"
 
-# Verify settings.json contains PermissionRequest hook
-settings_content="$(cat "$PROJECT_ROOT/templates/.claude/settings.json")"
-assert_contains "settings.json has PermissionRequest hook" "PermissionRequest" "$settings_content"
-assert_contains "settings.json routes to Opus" "claude-opus-4-6" "$settings_content"
+# Verify settings.local.json contains PermissionRequest hook (supervisor's overlay)
+settings_local_content="$(cat "$PROJECT_ROOT/templates/.claude/settings.local.json")"
+assert_contains "settings.local.json has PermissionRequest hook" "PermissionRequest" "$settings_local_content"
+assert_contains "settings.local.json routes to Opus"             "claude-opus-4-7"   "$settings_local_content"
 
-# Verify techdebt.md (command) has required frontmatter
-techdebt_content="$(cat "$PROJECT_ROOT/templates/.claude/commands/techdebt.md")"
-assert_contains "techdebt.md has description" "description:" "$techdebt_content"
-assert_contains "techdebt.md has allowed-tools" "allowed-tools:" "$techdebt_content"
+# Verify _example-agent.md has required frontmatter
+example_agent_content="$(cat "$PROJECT_ROOT/templates/.claude/agents/_example-agent.md")"
+assert_contains "_example-agent.md has name field"   "name:"        "$example_agent_content"
+assert_contains "_example-agent.md has description"  "description:" "$example_agent_content"
+assert_contains "_example-agent.md has tools"        "tools:"       "$example_agent_content"
 
-# Verify reviewer.md (subagent) has required frontmatter
-reviewer_content="$(cat "$PROJECT_ROOT/templates/.claude/agents/reviewer.md")"
-assert_contains "reviewer.md has name field" "name: reviewer" "$reviewer_content"
-assert_contains "reviewer.md has description" "description:" "$reviewer_content"
-assert_contains "reviewer.md has tools" "tools:" "$reviewer_content"
+# Verify CLAUDE.md contains supervisor fenced block (so it's ready for minimal-fallback scaffold)
+claude_md_template_content="$(cat "$PROJECT_ROOT/templates/CLAUDE.md")"
+assert_contains "templates/CLAUDE.md has supervisor block" "BEGIN claude-supervisor" "$claude_md_template_content"
+
+# Verify update.sh is present and executable
+assert_file_exists "bin/update.sh exists" "$PROJECT_ROOT/bin/update.sh"
+if [[ -x "$PROJECT_ROOT/bin/update.sh" ]]; then
+  pass "update.sh is executable"
+else
+  fail "update.sh is not executable"
+fi
 
 # ─── Test: scripts are executable ────────────────────────────────────────────
 
@@ -803,6 +935,12 @@ if [[ -x "$PROJECT_ROOT/bin/collect-learnings.sh" ]]; then
   pass "collect-learnings.sh is executable"
 else
   fail "collect-learnings.sh is not executable"
+fi
+
+if [[ -x "$PROJECT_ROOT/bin/update.sh" ]]; then
+  pass "update.sh is executable"
+else
+  fail "update.sh is not executable"
 fi
 
 # ─── Test: collect-learnings.sh ──────────────────────────────────────────────

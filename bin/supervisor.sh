@@ -52,75 +52,128 @@ if ! git -C "$repo_path" rev-parse --git-dir &>/dev/null; then
 fi
 
 # ─── Auto-init check ────────────────────────────────────────────────────────
-# If tasks.conf doesn't exist in the repo, scaffold everything from templates.
+# Triggered when .claude/settings.local.json (supervisor's overlay marker) is absent.
 
-if [[ ! -f "$repo_path/tasks.conf" ]]; then
+_gitignore_add() {
+  local gitignore_file="$1" entry="$2" comment="$3"
+  if ! grep -qx "$entry" "$gitignore_file" 2>/dev/null; then
+    printf '\n# %s\n%s\n' "$comment" "$entry" >> "$gitignore_file"
+  fi
+}
+
+_upsert_supervisor_block() {
+  local repo="$1"
+  local claude_md="$repo/.claude/CLAUDE.md"
+  local block='<!-- BEGIN claude-supervisor (do not edit by hand) -->
+## Worktree-sync Notes
+
+This project uses `claude-supervisor` to run parallel agents across isolated git worktrees.
+
+**Race-condition guidance:**
+- Each agent works in its own worktree — never write to another agent'"'"'s branch
+- After adding to Known Pitfalls, commit this file:
+  `git add .claude/CLAUDE.md && git commit -m "docs: update CLAUDE.md"`
+
+**Sharing learnings across worktrees:**
+The project owner runs `collect-learnings.sh [--yes] <repo_path>` to merge
+new pitfall bullets from all active worktrees into the main copy.
+
+**Shared peer notes:**
+- Read peer updates: `cat .claude/agents-shared/*.md`
+- Use `/share <message>` to append a timestamped note for peers
+- Use `/peers` to view all peer notes
+<!-- END claude-supervisor -->'
+
+  [[ -d "$(dirname "$claude_md")" ]] || mkdir -p "$(dirname "$claude_md")"
+  [[ -f "$claude_md" ]] || touch "$claude_md"
+  if ! grep -q "BEGIN claude-supervisor" "$claude_md" 2>/dev/null; then
+    printf '\n%s\n' "$block" >> "$claude_md"
+    ok "Added worktree-sync block to .claude/CLAUDE.md"
+  fi
+}
+
+if [[ ! -f "$repo_path/.claude/settings.local.json" ]]; then
   echo ""
   info "Project not yet set up. Initialising..."
   echo ""
 
-  # Scaffold tasks.conf
-  cp "$TEMPLATES_DIR/tasks.conf" "$repo_path/tasks.conf"
-  ok "Created tasks.conf"
+  # ── tasks.conf (kept for backward compat until v1.0 bullet-list input) ─────
+  if [[ ! -f "$repo_path/tasks.conf" ]]; then
+    cp "$TEMPLATES_DIR/tasks.conf" "$repo_path/tasks.conf"
+    ok "Created tasks.conf"
+  fi
 
-  # Add tasks.conf to .gitignore (personal/ephemeral — not committed)
+  # ── .gitignore: tasks.conf entry (idempotent) ─────────────────────────────
   gitignore="$repo_path/.gitignore"
-  if [[ -f "$gitignore" ]]; then
-    if ! grep -qx "tasks.conf" "$gitignore" 2>/dev/null; then
-      printf '\n\n# Claude Supervisor — personal task config (not shared)\ntasks.conf\n' >> "$gitignore"
-      ok "Added tasks.conf to .gitignore"
-    fi
-  else
-    printf '# Claude Supervisor — personal task config (not shared)\ntasks.conf\n' > "$gitignore"
-    ok "Created .gitignore with tasks.conf"
+  [[ -f "$gitignore" ]] || touch "$gitignore"
+  if ! grep -qx "tasks.conf" "$gitignore" 2>/dev/null; then
+    printf '\n# Claude Supervisor — personal task config (not shared)\ntasks.conf\n' >> "$gitignore"
+    ok "Added tasks.conf to .gitignore"
   fi
 
-  # Scaffold .claude/ directory (skip if already exists)
-  if [[ ! -d "$repo_path/.claude" ]]; then
-    mkdir -p "$repo_path/.claude/agents"
-    mkdir -p "$repo_path/.claude/commands"
-    mkdir -p "$repo_path/.claude/skills"
-
-    # Copy CLAUDE.md
-    if [[ -f "$TEMPLATES_DIR/CLAUDE.md" ]]; then
-      cp "$TEMPLATES_DIR/CLAUDE.md" "$repo_path/.claude/CLAUDE.md"
-      ok "Created .claude/CLAUDE.md       (project memory template)"
-    fi
-
-    # Copy settings.json
-    if [[ -f "$TEMPLATES_DIR/.claude/settings.json" ]]; then
-      cp "$TEMPLATES_DIR/.claude/settings.json" "$repo_path/.claude/settings.json"
-      ok "Created .claude/settings.json   (PermissionRequest → Opus hook)"
-    fi
-
-    # Copy agents directory contents
-    if [[ -d "$TEMPLATES_DIR/.claude/agents" ]]; then
-      cp -r "$TEMPLATES_DIR/.claude/agents/"* "$repo_path/.claude/agents/" 2>/dev/null || true
-      ok "Created .claude/agents/         (reviewer, debugger, test-writer subagents)"
+  # ── Bootstrap workspace via workspace-kit (or bare fallback) ───────────────
+  if [[ -d "$repo_path/.claude" ]]; then
+    if [[ -f "$repo_path/.cwk.lock" ]]; then
+      ok ".cwk.lock found — workspace-kit already initialised"
     else
-      ok "Created .claude/agents/         (add custom subagents here)"
-    fi
-
-    # Copy commands directory contents
-    if [[ -d "$TEMPLATES_DIR/.claude/commands" ]]; then
-      cp -r "$TEMPLATES_DIR/.claude/commands/"* "$repo_path/.claude/commands/" 2>/dev/null || true
-      ok "Created .claude/commands/       (/techdebt, /explain, /diagram, /learn skills)"
-    else
-      ok "Created .claude/commands/       (add custom slash commands here)"
-    fi
-
-    # Copy skills directory contents
-    if [[ -d "$TEMPLATES_DIR/.claude/skills" ]]; then
-      cp -r "$TEMPLATES_DIR/.claude/skills/"* "$repo_path/.claude/skills/" 2>/dev/null || true
-      ok "Created .claude/skills/         (/generate-skill + example template)"
-    else
-      ok "Created .claude/skills/         (add custom skills here)"
+      warn ".claude/ already exists — skipping workspace bootstrap"
     fi
   else
-    warn ".claude/ directory already exists — skipping scaffold"
+    if [[ -f "$repo_path/.cwk.lock" ]]; then
+      ok ".cwk.lock found — workspace-kit already initialised"
+      mkdir -p "$repo_path/.claude"
+    else
+      echo ""
+      printf "  Set up project agents and skills via ${CYAN}claude-workspace-kit${RESET}? [Y/n] "
+      read -r _cwk_ans
+      echo ""
+      _cwk_ans="${_cwk_ans:-Y}"
+
+      _cwk_ok=false
+      if [[ "$_cwk_ans" =~ ^[Yy] ]]; then
+        if command -v npx &>/dev/null; then
+          info "Running npx claude-workspace-kit init..."
+          if npx --yes claude-workspace-kit init "$repo_path"; then
+            ok "workspace-kit initialised"
+            _cwk_ok=true
+          else
+            warn "workspace-kit init failed — using minimal scaffold"
+          fi
+        else
+          warn "npx not found — using minimal scaffold"
+        fi
+      fi
+
+      if ! $_cwk_ok; then
+        mkdir -p "$repo_path/.claude/agents"
+        cp "$TEMPLATES_DIR/CLAUDE.md" "$repo_path/.claude/CLAUDE.md"
+        ok "Created .claude/CLAUDE.md       (project memory template)"
+        if [[ -f "$TEMPLATES_DIR/.claude/agents/_example-agent.md" ]]; then
+          cp "$TEMPLATES_DIR/.claude/agents/_example-agent.md" "$repo_path/.claude/agents/_example-agent.md"
+          ok "Created .claude/agents/         (_example-agent.md template)"
+        fi
+      fi
+    fi
   fi
 
-  # Show available models so the user knows what to put in tasks.conf
+  # ── Supervisor overlay: settings.local.json ────────────────────────────────
+  mkdir -p "$repo_path/.claude"
+  cp "$TEMPLATES_DIR/.claude/settings.local.json" "$repo_path/.claude/settings.local.json"
+  ok "Created .claude/settings.local.json  (PermissionRequest → Opus hook)"
+
+  # ── Shared peer notes directory ────────────────────────────────────────────
+  mkdir -p "$repo_path/.claude/agents-shared"
+  ok "Created .claude/agents-shared/       (shared peer notes, gitignored)"
+
+  # ── Append fenced supervisor block to CLAUDE.md ───────────────────────────
+  _upsert_supervisor_block "$repo_path"
+
+  # ── .gitignore: supervisor entries (idempotent) ────────────────────────────
+  _gitignore_add "$gitignore" ".env" "Claude Supervisor — local secrets"
+  _gitignore_add "$gitignore" ".claude/agents-shared/" "Claude Supervisor — shared peer notes"
+  ok "Updated .gitignore"
+
+  # ── Show available models ──────────────────────────────────────────────────
   step "Available models"
   show_available_models "$repo_path"
 
@@ -155,10 +208,11 @@ step "3/4 — Loading available models"
 fetch_models
 
 # Warn if the PermissionRequest hook model is no longer available.
-# Models get deprecated — if settings.json still references an old model ID the
+# Models get deprecated — if settings.local.json still references an old model ID the
 # hook will silently fail, which means risky actions go ungated.
 _check_hook_model() {
-  local settings_file="$repo_path/.claude/settings.json"
+  local settings_file="$repo_path/.claude/settings.local.json"
+  [[ -f "$settings_file" ]] || settings_file="$repo_path/.claude/settings.json"
   [[ -f "$settings_file" ]] || return
   [[ ${#AVAILABLE_MODELS[@]} -eq 0 ]] && return  # couldn't fetch models — skip check
 
@@ -182,7 +236,7 @@ _check_hook_model() {
 
   if [[ "$found" == false ]]; then
     warn "PermissionRequest hook uses '$hook_model' — this model is no longer available."
-    printf "    → Update ${CYAN}%s/.claude/settings.json${RESET} with a current model.\n" "$repo_path"
+    printf "    → Update ${CYAN}%s/.claude/settings.local.json${RESET} with a current model.\n" "$repo_path"
     printf "    → Recommended replacements (from live model list):\n"
     for entry in "${AVAILABLE_MODELS[@]}"; do
       local mid="${entry%%|*}"
