@@ -360,27 +360,33 @@ elif [[ ! -t 0 ]]; then
   _TASK_INPUT="$(cat)"
 
 else
-  # Interactive editor mode
-  _stub_file="$(mktemp /tmp/supervisor-tasks-XXXX.md)"
-  cat > "$_stub_file" <<'STUB'
-# Describe your tasks — one bullet per agent.
-#
-# Format:   - <task description> [tags]
-# Tags:     model: sonnet|haiku|opus   mode: plan   branch: my-branch   depends: other-branch
-# Examples:
-#   - review the codebase and write an implementation plan [plan, model: opus]
-#   - implement the OAuth login flow [model: sonnet, branch: feat-oauth]
-#   - write tests for OAuth [depends: feat-oauth]
-#
-# Lines starting with # are ignored.  Sub-bullets are ignored.
-# Save and close to continue.  Leave empty to cancel.
-
--
-STUB
-  _editor="${VISUAL:-${EDITOR:-vi}}"
-  "$_editor" "$_stub_file" </dev/tty >/dev/tty
-  _TASK_INPUT="$(cat "$_stub_file")"
-  rm -f "$_stub_file"
+  # Interactive prompt loop — one question per task
+  echo ""
+  printf "  Optional tags: [model: sonnet|haiku|opus]  [plan]  [branch: name]  [depends: branch]\n"
+  echo ""
+  _task_num=1
+  while true; do
+    if [[ $_task_num -eq 1 ]]; then
+      printf "  ${BOLD}What would you like to work on?${RESET}\n  > "
+    else
+      printf "  ${BOLD}Task $_task_num:${RESET}\n  > "
+    fi
+    read -r _task_line </dev/tty || break
+    _task_line="${_task_line## }"; _task_line="${_task_line%% }"
+    if [[ -z "$_task_line" ]]; then
+      printf "  ${YELLOW}(empty — skipped)${RESET}\n"
+    else
+      [[ "$_task_line" =~ ^[-*+][[:space:]] ]] || _task_line="- $_task_line"
+      _TASK_INPUT+="$_task_line"$'\n'
+      _task_num=$(( _task_num + 1 ))
+    fi
+    echo ""
+    printf "  Add another task? [y/N] "
+    read -r _more </dev/tty || _more="n"
+    [[ -z "$_more" ]] && _more="n"
+    echo ""
+    [[ "$_more" =~ ^[Yy] ]] || break
+  done
 fi
 
 # ── Parse bullets ─────────────────────────────────────────────────────────────
