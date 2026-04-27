@@ -32,8 +32,7 @@
     "prepublishOnly": "bash tests/smoke.sh",
     "release:patch": "bash bin/release.sh patch",
     "release:minor": "bash bin/release.sh minor",
-    "release:major": "bash bin/release.sh major",
-    "release:tag": "bash bin/release-tag.sh"
+    "release:major": "bash bin/release.sh major"
   },
   "keywords": [
     "claude",
