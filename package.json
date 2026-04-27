@@ -29,11 +29,11 @@
   ],
   "scripts": {
     "test": "bash tests/smoke.sh",
-    "version": "printf '%s' \"$npm_package_version\" > VERSION && git add VERSION",
     "prepublishOnly": "bash tests/smoke.sh",
-    "release:patch": "npm version patch && git push && git push --tags",
-    "release:minor": "npm version minor && git push && git push --tags",
-    "release:major": "npm version major && git push && git push --tags"
+    "release:patch": "bash bin/release.sh patch",
+    "release:minor": "bash bin/release.sh minor",
+    "release:major": "bash bin/release.sh major",
+    "release:tag": "bash bin/release-tag.sh"
   },
   "keywords": [
     "claude",
